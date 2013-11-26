@@ -426,8 +426,11 @@ static void* load_system_driver(const char* kind) {
                         continue;
                     }
                     if (!strcmp(e->d_name, "libGLES_android.so")) {
+                        // don't skip software render if define USE_SW_OPENGL
+#ifndef USE_SW_OPENGL
                         // always skip the software renderer
                         continue;
+#endif
                     }
                     if (strstr(e->d_name, pattern.string()) == e->d_name) {
                         if (!strcmp(e->d_name + strlen(e->d_name) - 3, ".so")) {
