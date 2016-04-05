@@ -51,7 +51,6 @@ typedef struct OMX_AUDIO_PARAM_WMATYPE_EXT {
 
 #define   OMX_IndexParamAudioOutputConvert FSL_INDEXTYPE(69)
 
-
 typedef struct
 {
     OMX_U32 nSize;              /**< size of the structure in bytes */
@@ -78,3 +77,11 @@ typedef struct
     OMX_VERSIONTYPE nVersion;   /**< OMX specification version information */
     OMX_BOOL bEnable;
 } OMX_PARAM_AUDIO_SEND_FIRST_PORT_SETTING_CHANGED;
+
+#define OMX_IndexConfigVideoMediaTime FSL_INDEXTYPE(71)
+typedef struct
+{
+    OMX_U32 nSize;              /**< size of the structure in bytes */
+    OMX_VERSIONTYPE nVersion;   /**< OMX specification version information */
+    OMX_S64 nTime;
+} OMX_CONFIG_VIDEO_MEDIA_TIME;
