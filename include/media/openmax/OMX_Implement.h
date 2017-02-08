@@ -1,5 +1,6 @@
 /**
  * Copyright (C) 2016 Freescale Semiconductor, Inc.
+ * Copyright 2017 NXP
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -90,6 +91,7 @@ typedef struct
     OMX_U32 nSize;              /**< size of the structure in bytes */
     OMX_VERSIONTYPE nVersion;   /**< OMX specification version information */
     OMX_S64 nTime;
+    OMX_S32 nScale;
 } OMX_CONFIG_VIDEO_MEDIA_TIME;
 
 #define OMX_IndexParamDecoderCachedThreshold FSL_INDEXTYPE(37)
