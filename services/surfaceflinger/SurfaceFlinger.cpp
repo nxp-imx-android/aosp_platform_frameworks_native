@@ -1280,7 +1280,7 @@ void SurfaceFlinger::rebuildLayerStacks() {
                 // all the display use one layer source, if layer's visable region updated
                 // after PRIMARY display, the dirty region of EXTERNAL display will not correct.
                 SurfaceFlinger::computeVisibleRegions(layers,
-                        hw->getLayerStack(), dirtyRegion, opaqueRegion,
+                        displayDevice->getLayerStack(), dirtyRegion, opaqueRegion,
                         (dpy == mDisplays.size() - 1) || forceUpdate);
 #else
                 SurfaceFlinger::computeVisibleRegions(layers,
@@ -2102,6 +2102,7 @@ void SurfaceFlinger::doDisplayComposition(const sp<const DisplayDevice>& hw,
         // we can redraw only what's dirty, but since SWAP_RECTANGLE only
         // takes a rectangle, we must make sure to update that whole
         // rectangle in that case
+#ifndef USE_HWC2
         const int32_t id = hw->getHwcDisplayId();
         HWComposer& hwc(getHwComposer());
         HWComposer::LayerListIterator cur = hwc.begin(id);
@@ -2113,6 +2114,9 @@ void SurfaceFlinger::doDisplayComposition(const sp<const DisplayDevice>& hw,
         }else {
             dirtyRegion.set(hw->swapRegion.bounds());
         }
+#else
+        dirtyRegion.set(hw->swapRegion.bounds());
+#endif
     } else {
         if (flags & DisplayDevice::PARTIAL_UPDATES) {
             // We need to redraw the rectangle that will be updated
@@ -3636,7 +3640,7 @@ status_t SurfaceFlinger::captureScreen(const sp<IBinder>& display,
 #include <GLES/glext.h>
 void SurfaceFlinger::renderScreenImplLocked(
         const sp<const DisplayDevice>& hw,
-        Rect sourceCrop, uint32_t reqWidth, uint32_t reqHeight,
+        Rect /*sourceCrop*/, uint32_t reqWidth, uint32_t reqHeight,
         uint32_t minLayerZ, uint32_t maxLayerZ,
         bool yswap, bool useIdentityTransform, Transform::orientation_flags rotation __unused)
 {
@@ -3683,8 +3687,10 @@ void SurfaceFlinger::renderScreenImplLocked(
         }
     }
 
+#ifndef USE_HWC2
     // compositionComplete is needed for older driver
     hw->compositionComplete();
+#endif
 }
 
 

@@ -63,6 +63,7 @@ bool LayerDim::isVisible() const {
     return !(s.flags & layer_state_t::eLayerHidden) && s.alpha;
 }
 
+#ifndef USE_HWC2
 static Rect reduce(const Rect& win, const Region& exclude) {
     if (CC_LIKELY(exclude.isEmpty())) {
         return win;
@@ -180,6 +181,7 @@ void LayerDim::setPerFrameData(const sp<const DisplayDevice>& hw,
     layer.setVisibleRegionScreen(visible);
     // leave it as it is for dim layer.
 }
+#endif
 
 // ---------------------------------------------------------------------------
 

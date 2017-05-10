@@ -136,7 +136,9 @@ DisplayDevice::DisplayDevice(
     if (mType >= DisplayDevice::DISPLAY_VIRTUAL) {
         // reset virtual display buffer format.
         // because it is changed by eglCreateWindowSurface().
+#ifndef USE_HWC2
         native_window_set_buffers_format(window, format);
+#endif
         window->setSwapInterval(window, 0);
     }
 
