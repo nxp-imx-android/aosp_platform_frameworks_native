@@ -43,6 +43,7 @@
 
 #include <pixelflinger/format.h>
 #include <pixelflinger/pixelflinger.h>
+#include <graphics_ext.h>
 
 #include "context.h"
 #include "state.h"
