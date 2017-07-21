@@ -3665,7 +3665,7 @@ status_t SurfaceFlinger::captureScreenImplLocked(
 
     // and create the corresponding EGLSurface
     EGLSurface eglSurface = eglCreateWindowSurface(
-            mEGLDisplay, NULL, window, NULL);
+            mEGLDisplay, mRenderEngine->getEGLConfig(), window, NULL);
     if (eglSurface == EGL_NO_SURFACE) {
         ALOGE("captureScreenImplLocked: eglCreateWindowSurface() failed 0x%4x",
                 eglGetError());
