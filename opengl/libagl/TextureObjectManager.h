@@ -28,7 +28,10 @@
 #include <utils/Errors.h>
 
 #include <private/pixelflinger/ggl_context.h>
+
+#ifdef IMX_GRAPHIC_EXT
 #include <graphics_ext.h>
+#endif
 
 #include <GLES/gl.h>
 #include <EGL/egl.h>

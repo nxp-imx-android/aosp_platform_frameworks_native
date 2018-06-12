@@ -42,7 +42,10 @@
 
 #include <pixelflinger/format.h>
 #include <pixelflinger/pixelflinger.h>
+
+#ifdef IMX_GRAPHIC_EXT
 #include <graphics_ext.h>
+#endif
 
 #include "context.h"
 #include "state.h"
@@ -2112,6 +2115,7 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target,
         case HAL_PIXEL_FORMAT_RGB_565:
         case HAL_PIXEL_FORMAT_BGRA_8888:
             break;
+#ifdef IMX_GRAPHIC_EXT
         //add YUV format support
         case HAL_PIXEL_FORMAT_YV12:
         case HAL_PIXEL_FORMAT_YCbCr_422_SP:
@@ -2122,6 +2126,7 @@ EGLImageKHR eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target,
         case HAL_PIXEL_FORMAT_CbYCrY_422_I:
         case HAL_PIXEL_FORMAT_YCbCr_420_SP:
             break;
+#endif
         default:
             return setError(EGL_BAD_PARAMETER, EGL_NO_IMAGE_KHR);
     }
