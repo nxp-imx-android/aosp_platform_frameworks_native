@@ -501,15 +501,20 @@ Rect Layer::computeBounds(const Region& activeTransparentRegion) const {
     Rect bounds = win;
     const auto& p = mDrawingParent.promote();
     if (p != nullptr) {
-        // Look in computeScreenBounds recursive call for explanation of
-        // why we pass false here.
-        bounds = p->computeScreenBounds(false /* reduceTransparentRegion */);
+        // We pass an empty Region here for reasons mirroring that of the case described in
+        // the computeScreenBounds reduceTransparentRegion=false case.
+        bounds = p->computeBounds(Region());
     }
 
-    Transform t = getTransform();
-    if (p != nullptr) {
+    Transform t = s.active.transform;
+
+    if (p != nullptr || !s.finalCrop.isEmpty()) {
+
         win = t.transform(win);
         win.intersect(bounds, &win);
+        if (!s.finalCrop.isEmpty()) {
+            win.intersect(s.finalCrop,&win);
+        }
         win = t.inverse().transform(win);
     }
 
@@ -1889,7 +1894,15 @@ bool Layer::setAlpha(uint8_t alpha) {
     setTransactionFlags(eTransactionNeeded);
     return true;
 }
-bool Layer::setMatrix(const layer_state_t::matrix22_t& matrix) {
+bool Layer::setMatrix(const layer_state_t::matrix22_t& matrix,
+        bool allowNonRectPreservingTransforms) {
+    Transform t;
+    t.set(matrix.dsdx, matrix.dtdy, matrix.dtdx, matrix.dsdy);
+
+    if (!allowNonRectPreservingTransforms && !t.preserveRects()) {
+        ALOGW("Attempt to set rotation matrix without permission ACCESS_SURFACE_FLINGER ignored");
+        return false;
+    }
     mCurrentState.sequence++;
     mCurrentState.requested.transform.set(
             matrix.dsdx, matrix.dtdy, matrix.dtdx, matrix.dsdy);
