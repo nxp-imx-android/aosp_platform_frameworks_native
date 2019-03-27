@@ -586,6 +586,11 @@ status_t HWComposer::presentAndGetReleaseFences(int32_t displayId) {
     }
 
     auto error = hwcDisplay->present(&displayData.lastPresentFence);
+    // Dont log NOT_VALIDATED error as we will trigger
+    // Multiple refresh for evs case
+    if(error == HWC2::Error::NotValidated){
+        return UNKNOWN_ERROR;
+    }
     RETURN_IF_HWC_ERROR_FOR("present", error, displayId, UNKNOWN_ERROR);
 
     std::unordered_map<HWC2::Layer*, sp<Fence>> releaseFences;
