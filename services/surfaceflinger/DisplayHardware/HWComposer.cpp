@@ -616,6 +616,12 @@ status_t HWComposer::presentAndGetReleaseFences(int32_t displayId) {
     }
 
     auto error = hwcDisplay->present(&displayData.lastPresentFence);
+    // Dont log NOT_VALIDATED error as we will trigger
+    // Multiple refresh for evs case
+    if(error == HWC2::Error::NotValidated){
+        return UNKNOWN_ERROR;
+    }
+
     if (error != HWC2::Error::None) {
         ALOGE("presentAndGetReleaseFences: failed for display %d: %s (%d)",
               displayId, to_string(error).c_str(), static_cast<int32_t>(error));
