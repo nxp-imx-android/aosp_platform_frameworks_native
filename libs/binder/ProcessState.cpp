@@ -22,6 +22,7 @@
 #include <binder/IPCThreadState.h>
 #include <binder/IServiceManager.h>
 #include <cutils/atomic.h>
+#include <cutils/properties.h>
 #include <utils/Log.h>
 #include <utils/String8.h>
 #include <utils/String8.h>
@@ -40,6 +41,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#define LOWRAM_BINDER_VM_SIZE ((1 * 800 * 1024) - sysconf(_SC_PAGE_SIZE) * 2)
 #define BINDER_VM_SIZE ((1 * 1024 * 1024) - sysconf(_SC_PAGE_SIZE) * 2)
 #define DEFAULT_MAX_BINDER_THREADS 15
 
@@ -423,7 +425,11 @@ ProcessState::ProcessState(const char *driver)
 {
     if (mDriverFD >= 0) {
         // mmap the binder, providing a chunk of virtual address space to receive transactions.
-        mVMStart = mmap(0, BINDER_VM_SIZE, PROT_READ, MAP_PRIVATE | MAP_NORESERVE, mDriverFD, 0);
+        if (property_get_bool("ro.config.low_ram", false)) {
+            mVMStart = mmap(0, LOWRAM_BINDER_VM_SIZE, PROT_READ, MAP_PRIVATE | MAP_NORESERVE, mDriverFD, 0);
+        } else {
+            mVMStart = mmap(0, BINDER_VM_SIZE, PROT_READ, MAP_PRIVATE | MAP_NORESERVE, mDriverFD, 0);
+        }
         if (mVMStart == MAP_FAILED) {
             // *sigh*
             ALOGE("Using %s failed: unable to mmap transaction memory.\n", mDriverName.c_str());
@@ -440,7 +446,11 @@ ProcessState::~ProcessState()
 {
     if (mDriverFD >= 0) {
         if (mVMStart != MAP_FAILED) {
-            munmap(mVMStart, BINDER_VM_SIZE);
+            if (property_get_bool("ro.config.low_ram", false)) {
+                munmap(mVMStart, LOWRAM_BINDER_VM_SIZE);
+            } else {
+                munmap(mVMStart, BINDER_VM_SIZE);
+            }
         }
         close(mDriverFD);
     }
