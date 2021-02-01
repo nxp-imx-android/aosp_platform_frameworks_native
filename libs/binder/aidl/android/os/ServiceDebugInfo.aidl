@@ -1,5 +1,5 @@
 /*
- * Copyright 2019 The Android Open Source Project
+ * Copyright (C) 2021 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,15 +14,19 @@
  * limitations under the License.
  */
 
-#pragma once
+package android.os;
 
-#include "StrongTyping.h"
-
-#include <cstddef>
-
-namespace android {
-
-// Strong types for the different indexes as they are referring to a different base.
-using HwcConfigIndexType = StrongTyping<size_t, struct HwcConfigIndexTypeTag, Compare, Add, Hash>;
-
-} // namespace android
+/**
+ * Debug information associated with a registered service
+ * @hide
+ */
+parcelable ServiceDebugInfo {
+    /**
+     * Service name (see IServiceManager.addService/checkService/getService)
+     */
+    @utf8InCpp String name;
+    /**
+     * PID of service at the time of registration (may no longer be valid).
+     */
+    int debugPid;
+}

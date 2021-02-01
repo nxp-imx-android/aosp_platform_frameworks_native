@@ -33,7 +33,9 @@
 #include <gui/LayerMetadata.h>
 #include <log/log.h>
 
+#include "DisplayHardware/DisplayMode.h"
 #include "DisplayHardware/HWComposer.h"
+#include "DisplayHardware/Hal.h"
 #include "mock/DisplayHardware/MockComposer.h"
 
 // TODO(b/129481165): remove the #pragma below and fix conversion issues
@@ -229,7 +231,7 @@ void HWComposerConfigsTest::testSetActiveModeWithConstraintsCommon(
     constraints.seamlessRequired = false;
 
     hal::VsyncPeriodChangeTimeline timeline = {0, 0, 0};
-    constexpr HwcConfigIndexType kConfigIndex(0);
+    constexpr Config kConfigIndex = 0;
     const auto status =
             hwc.setActiveModeWithConstraints(physicalId, kConfigIndex, constraints, &timeline);
     EXPECT_EQ(NO_ERROR, status);
@@ -243,7 +245,8 @@ void HWComposerConfigsTest::testSetActiveModeWithConstraintsCommon(
 
     for (size_t configIndex = 0; configIndex < kConfigs.size(); configIndex++) {
         const auto status =
-                hwc.setActiveModeWithConstraints(physicalId, HwcConfigIndexType(configIndex),
+                hwc.setActiveModeWithConstraints(physicalId,
+                                                 static_cast<hal::HWConfigId>(configIndex),
                                                  constraints, &timeline);
         EXPECT_EQ(NO_ERROR, status) << "Error when switching to config " << configIndex;
     }

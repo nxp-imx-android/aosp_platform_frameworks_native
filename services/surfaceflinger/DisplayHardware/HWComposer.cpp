@@ -318,7 +318,7 @@ void HWComposer::loadModes(DisplayData& displayData, hal::HWDisplayId hwcDisplay
     displayData.modes.clear();
     for (auto configId : configIds) {
         auto mode = DisplayMode::Builder(configId)
-                            .setId(HwcConfigIndexType(displayData.modes.size()))
+                            .setId(DisplayModeId(displayData.modes.size()))
                             .setWidth(getAttribute(hwcDisplayId, configId, hal::Attribute::WIDTH))
                             .setHeight(getAttribute(hwcDisplayId, configId, hal::Attribute::HEIGHT))
                             .setVsyncPeriod(getAttribute(hwcDisplayId, configId,
@@ -674,20 +674,14 @@ status_t HWComposer::setPowerMode(PhysicalDisplayId displayId, hal::PowerMode mo
 }
 
 status_t HWComposer::setActiveModeWithConstraints(
-        PhysicalDisplayId displayId, HwcConfigIndexType modeId,
+        PhysicalDisplayId displayId, hal::HWConfigId hwcModeId,
         const hal::VsyncPeriodChangeConstraints& constraints,
         hal::VsyncPeriodChangeTimeline* outTimeline) {
     RETURN_IF_INVALID_DISPLAY(displayId, BAD_INDEX);
 
-    auto& displayData = mDisplayData[displayId];
-    if (modeId.value() >= displayData.modes.size()) {
-        LOG_DISPLAY_ERROR(displayId, ("Invalid mode " + std::to_string(modeId.value())).c_str());
-        return BAD_INDEX;
-    }
-
-    const auto hwcConfigId = displayData.modes[modeId.value()]->getHwcId();
-    auto error = displayData.hwcDisplay->setActiveConfigWithConstraints(hwcConfigId, constraints,
-                                                                        outTimeline);
+    auto error = mDisplayData[displayId].hwcDisplay->setActiveConfigWithConstraints(hwcModeId,
+                                                                                    constraints,
+                                                                                    outTimeline);
     RETURN_IF_HWC_ERROR(error, displayId, UNKNOWN_ERROR);
     return NO_ERROR;
 }

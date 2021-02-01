@@ -16,6 +16,7 @@
 
 #define LOG_TAG "LayerState"
 
+#include <apex/window.h>
 #include <inttypes.h>
 
 #include <binder/Parcel.h>
@@ -182,12 +183,9 @@ status_t layer_state_t::read(const Parcel& input)
     SAFE_PARCEL(input.readUint32, &layerStack);
     SAFE_PARCEL(input.readFloat, &alpha);
 
-    uint32_t tmpUint32 = 0;
-    SAFE_PARCEL(input.readUint32, &tmpUint32);
-    flags = static_cast<uint8_t>(tmpUint32);
+    SAFE_PARCEL(input.readUint32, &flags);
 
-    SAFE_PARCEL(input.readUint32, &tmpUint32);
-    mask = static_cast<uint8_t>(tmpUint32);
+    SAFE_PARCEL(input.readUint32, &mask);
 
     SAFE_PARCEL(matrix.read, input);
     SAFE_PARCEL(input.read, crop_legacy);
@@ -228,6 +226,7 @@ status_t layer_state_t::read(const Parcel& input)
         SAFE_PARCEL(input.read, *acquireFence);
     }
 
+    uint32_t tmpUint32 = 0;
     SAFE_PARCEL(input.readUint32, &tmpUint32);
     dataspace = static_cast<ui::Dataspace>(tmpUint32);
 
@@ -620,7 +619,8 @@ status_t InputWindowCommands::read(const Parcel& input) {
     return NO_ERROR;
 }
 
-bool ValidateFrameRate(float frameRate, int8_t compatibility, const char* inFunctionName) {
+bool ValidateFrameRate(float frameRate, int8_t compatibility, const char* inFunctionName,
+                       bool privileged) {
     const char* functionName = inFunctionName != nullptr ? inFunctionName : "call";
     int floatClassification = std::fpclassify(frameRate);
     if (frameRate < 0 || floatClassification == FP_INFINITE || floatClassification == FP_NAN) {
@@ -629,8 +629,10 @@ bool ValidateFrameRate(float frameRate, int8_t compatibility, const char* inFunc
     }
 
     if (compatibility != ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT &&
-        compatibility != ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE) {
-        ALOGE("%s failed - invalid compatibility value %d", functionName, compatibility);
+        compatibility != ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE &&
+        (!privileged || compatibility != ANATIVEWINDOW_FRAME_RATE_EXACT)) {
+        ALOGE("%s failed - invalid compatibility value %d privileged: %s", functionName,
+              compatibility, privileged ? "yes" : "no");
         return false;
     }
 

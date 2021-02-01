@@ -934,7 +934,8 @@ SurfaceComposerClient::Transaction& SurfaceComposerClient::Transaction::setFlags
         return *this;
     }
     if ((mask & layer_state_t::eLayerOpaque) || (mask & layer_state_t::eLayerHidden) ||
-        (mask & layer_state_t::eLayerSecure) || (mask & layer_state_t::eLayerSkipScreenshot)) {
+        (mask & layer_state_t::eLayerSecure) || (mask & layer_state_t::eLayerSkipScreenshot) ||
+        (mask & layer_state_t::eEnableBackpressure)) {
         s->what |= layer_state_t::eFlagsChanged;
     }
     s->flags &= ~mask;
@@ -1518,7 +1519,10 @@ SurfaceComposerClient::Transaction& SurfaceComposerClient::Transaction::setFrame
         mStatus = BAD_INDEX;
         return *this;
     }
-    if (!ValidateFrameRate(frameRate, compatibility, "Transaction::setFrameRate")) {
+    // Allow privileged values as well here, those will be ignored by SF if
+    // the caller is not privileged
+    if (!ValidateFrameRate(frameRate, compatibility, "Transaction::setFrameRate",
+                           /*privileged=*/true)) {
         mStatus = BAD_VALUE;
         return *this;
     }
