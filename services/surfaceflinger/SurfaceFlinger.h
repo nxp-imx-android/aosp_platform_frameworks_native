@@ -642,6 +642,8 @@ private:
     void setPowerMode(const sp<IBinder>& displayToken, int mode) override;
     status_t clearAnimationFrameStats() override;
     status_t getAnimationFrameStats(FrameStats* outStats) const override;
+    status_t overrideHdrTypes(const sp<IBinder>& displayToken,
+                              const std::vector<ui::Hdr>& hdrTypes) override;
     status_t enableVSyncInjections(bool enable) override;
     status_t injectVSync(nsecs_t when) override;
     status_t getLayerDebugInfo(std::vector<LayerDebugInfo>* outLayers) override;
@@ -844,6 +846,7 @@ private:
     uint32_t setDisplayStateLocked(const DisplayState& s) REQUIRES(mStateLock);
     uint32_t addInputWindowCommands(const InputWindowCommands& inputWindowCommands)
             REQUIRES(mStateLock);
+    bool frameIsEarly(nsecs_t expectedPresentTime, int64_t vsyncId) const;
     /*
      * Layer management
      */
@@ -1094,10 +1097,6 @@ private:
     void dumpOffscreenLayers(std::string& result) EXCLUDES(mStateLock);
     void dumpPlannerInfo(const DumpArgs& args, std::string& result) const REQUIRES(mStateLock);
 
-    bool isLayerTripleBufferingDisabled() const {
-        return this->mLayerTripleBufferingDisabled;
-    }
-
     status_t doDump(int fd, const DumpArgs& args, bool asProto);
 
     status_t dumpCritical(int fd, const DumpArgs&, bool asProto);
@@ -1250,9 +1249,6 @@ private:
     std::atomic<uint32_t> mGpuFrameMissedCount = 0;
 
     TransactionCallbackInvoker mTransactionCallbackInvoker;
-
-    // Restrict layers to use two buffers in their bufferqueues.
-    bool mLayerTripleBufferingDisabled = false;
 
     // these are thread safe
     std::unique_ptr<MessageQueue> mEventQueue;

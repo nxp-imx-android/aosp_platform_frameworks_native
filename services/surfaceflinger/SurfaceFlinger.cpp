@@ -441,10 +441,6 @@ SurfaceFlinger::SurfaceFlinger(Factory& factory) : SurfaceFlinger(factory, SkipI
     mUseHwcVirtualDisplays = atoi(value);
     ALOGI_IF(mUseHwcVirtualDisplays, "Enabling HWC virtual displays");
 
-    property_get("ro.sf.disable_triple_buffer", value, "0");
-    mLayerTripleBufferingDisabled = atoi(value);
-    ALOGI_IF(mLayerTripleBufferingDisabled, "Disabling Triple Buffering");
-
     property_get("ro.surface_flinger.supports_background_blur", value, "0");
     bool supportsBlurs = atoi(value);
     mSupportsBlur = supportsBlurs;
@@ -1291,6 +1287,21 @@ status_t SurfaceFlinger::getAnimationFrameStats(FrameStats* outStats) const {
     return NO_ERROR;
 }
 
+status_t SurfaceFlinger::overrideHdrTypes(const sp<IBinder>& displayToken,
+                                          const std::vector<ui::Hdr>& hdrTypes) {
+    Mutex::Autolock lock(mStateLock);
+
+    auto display = getDisplayDeviceLocked(displayToken);
+    if (!display) {
+        ALOGE("%s: Invalid display token %p", __FUNCTION__, displayToken.get());
+        return NAME_NOT_FOUND;
+    }
+
+    display->overrideHdrTypes(hdrTypes);
+    dispatchDisplayHotplugEvent(display->getPhysicalId(), true /* connected */);
+    return NO_ERROR;
+}
+
 status_t SurfaceFlinger::getDisplayedContentSamplingAttributes(const sp<IBinder>& displayToken,
                                                                ui::PixelFormat* outFormat,
                                                                ui::Dataspace* outDataspace,
@@ -2115,7 +2126,8 @@ void SurfaceFlinger::postComposition() {
     // information from previous' frame classification is already available when sending jank info
     // to clients, so they get jank classification as early as possible.
     mFrameTimeline->setSfPresent(systemTime(),
-                                 std::make_shared<FenceTime>(mPreviousPresentFences[0]));
+                                 std::make_shared<FenceTime>(mPreviousPresentFences[0]),
+                                 glCompositionDoneFenceTime != FenceTime::NO_FENCE);
 
     nsecs_t dequeueReadyTime = systemTime();
     for (const auto& layer : mLayersWithQueuedFrames) {
@@ -3384,6 +3396,28 @@ bool SurfaceFlinger::transactionFlushNeeded() {
     return !mPendingTransactionQueues.empty() || !mTransactionQueue.empty();
 }
 
+bool SurfaceFlinger::frameIsEarly(nsecs_t expectedPresentTime, int64_t vsyncId) const {
+    // The amount of time SF can delay a frame if it is considered early based
+    // on the VsyncModulator::VsyncConfig::appWorkDuration
+    constexpr static std::chrono::nanoseconds kEarlyLatchMaxThreshold = 100ms;
+
+    const auto currentVsyncPeriod = mScheduler->getDisplayStatInfo(systemTime()).vsyncPeriod;
+    const auto earlyLatchVsyncThreshold = currentVsyncPeriod / 2;
+
+    const auto prediction = mFrameTimeline->getTokenManager()->getPredictionsForToken(vsyncId);
+    if (!prediction.has_value()) {
+        return false;
+    }
+
+    if (std::abs(prediction->presentTime - expectedPresentTime) >=
+        kEarlyLatchMaxThreshold.count()) {
+        return false;
+    }
+
+    return prediction->presentTime >= expectedPresentTime &&
+            prediction->presentTime - expectedPresentTime >= earlyLatchVsyncThreshold;
+}
+
 bool SurfaceFlinger::transactionIsReadyToBeApplied(
         const FrameTimelineInfo& info, bool isAutoTimestamp, int64_t desiredPresentTime,
         uid_t originUid, const Vector<ComposerState>& states,
@@ -3404,11 +3438,19 @@ bool SurfaceFlinger::transactionIsReadyToBeApplied(
         ready = false;
     }
 
+    // If the client didn't specify desiredPresentTime, use the vsyncId to determine the expected
+    // present time of this transaction.
+    if (isAutoTimestamp && frameIsEarly(expectedPresentTime, info.vsyncId)) {
+        ATRACE_NAME("frameIsEarly");
+        ready = false;
+    }
+
     for (const ComposerState& state : states) {
         const layer_state_t& s = state.state;
         const bool acquireFenceChanged = (s.what & layer_state_t::eAcquireFenceChanged);
         if (acquireFenceChanged && s.acquireFence &&
             s.acquireFence->getStatus() == Fence::Status::Unsignaled) {
+            ATRACE_NAME("fence unsignaled");
             ready = false;
         }
 
@@ -3424,13 +3466,6 @@ bool SurfaceFlinger::transactionIsReadyToBeApplied(
         }
 
         ATRACE_NAME(layer->getName().c_str());
-
-        const bool frameTimelineInfoChanged = (s.what & layer_state_t::eFrameTimelineInfoChanged);
-        const auto vsyncId = frameTimelineInfoChanged ? s.frameTimelineInfo.vsyncId : info.vsyncId;
-        if (isAutoTimestamp && layer->frameIsEarly(expectedPresentTime, vsyncId)) {
-            ATRACE_NAME("frameIsEarly()");
-            ready = false;
-        }
 
         if (acquireFenceChanged) {
             // If backpressure is enabled and we already have a buffer to commit, keep the
@@ -3958,12 +3993,6 @@ uint32_t SurfaceFlinger::setClientStateLocked(
             flags |= eTraversalNeeded;
         }
     }
-    FrameTimelineInfo info;
-    if (what & layer_state_t::eFrameTimelineInfoChanged) {
-        info = s.frameTimelineInfo;
-    } else if (frameTimelineInfo.vsyncId != FrameTimelineInfo::INVALID_VSYNC_ID) {
-        info = frameTimelineInfo;
-    }
     if (what & layer_state_t::eFixedTransformHintChanged) {
         if (layer->setFixedTransformHint(s.fixedTransformHint)) {
             flags |= eTraversalNeeded | eTransformHintUpdateNeeded;
@@ -4026,12 +4055,12 @@ uint32_t SurfaceFlinger::setClientStateLocked(
                 : layer->getHeadFrameNumber(-1 /* expectedPresentTime */) + 1;
 
         if (layer->setBuffer(buffer, s.acquireFence, postTime, desiredPresentTime, isAutoTimestamp,
-                             s.cachedBuffer, frameNumber, dequeueBufferTimestamp, info,
+                             s.cachedBuffer, frameNumber, dequeueBufferTimestamp, frameTimelineInfo,
                              s.releaseBufferListener)) {
             flags |= eTraversalNeeded;
         }
-    } else if (info.vsyncId != FrameTimelineInfo::INVALID_VSYNC_ID) {
-        layer->setFrameTimelineVsyncForBufferlessTransaction(info, postTime);
+    } else if (frameTimelineInfo.vsyncId != FrameTimelineInfo::INVALID_VSYNC_ID) {
+        layer->setFrameTimelineVsyncForBufferlessTransaction(frameTimelineInfo, postTime);
     }
 
     if (layer->setTransactionCompletedListeners(callbackHandles)) flags |= eTraversalNeeded;
@@ -4551,9 +4580,6 @@ void SurfaceFlinger::logFrameStats() {
 void SurfaceFlinger::appendSfConfigString(std::string& result) const {
     result.append(" [sf");
 
-    if (isLayerTripleBufferingDisabled())
-        result.append(" DISABLE_TRIPLE_BUFFERING");
-
     StringAppendF(&result, " PRESENT_TIME_OFFSET=%" PRId64, dispSyncPresentTimeOffset);
     StringAppendF(&result, " FORCE_HWC_FOR_RBG_TO_YUV=%d", useHwcForRgbToYuv);
     StringAppendF(&result, " MAX_VIRT_DISPLAY_DIM=%" PRIu64, maxVirtualDisplaySize);
@@ -5004,6 +5030,7 @@ status_t SurfaceFlinger::CheckTransactCodeCredentials(uint32_t code) {
         case DESTROY_DISPLAY:
         case ENABLE_VSYNC_INJECTIONS:
         case GET_ANIMATION_FRAME_STATS:
+        case OVERRIDE_HDR_TYPES:
         case GET_HDR_CAPABILITIES:
         case SET_DESIRED_DISPLAY_MODE_SPECS:
         case GET_DESIRED_DISPLAY_MODE_SPECS:
@@ -5020,9 +5047,11 @@ status_t SurfaceFlinger::CheckTransactCodeCredentials(uint32_t code) {
         case NOTIFY_POWER_BOOST:
         case SET_GLOBAL_SHADOW_SETTINGS:
         case ACQUIRE_FRAME_RATE_FLEXIBILITY_TOKEN: {
-            // ACQUIRE_FRAME_RATE_FLEXIBILITY_TOKEN is used by CTS tests, which acquire the
-            // necessary permission dynamically. Don't use the permission cache for this check.
-            bool usePermissionCache = code != ACQUIRE_FRAME_RATE_FLEXIBILITY_TOKEN;
+            // ACQUIRE_FRAME_RATE_FLEXIBILITY_TOKEN and OVERRIDE_HDR_TYPES are used by CTS tests,
+            // which acquire the necessary permission dynamically. Don't use the permission cache
+            // for this check.
+            bool usePermissionCache =
+                    code != ACQUIRE_FRAME_RATE_FLEXIBILITY_TOKEN && code != OVERRIDE_HDR_TYPES;
             if (!callingThreadHasUnscopedSurfaceFlingerAccess(usePermissionCache)) {
                 IPCThreadState* ipc = IPCThreadState::self();
                 ALOGE("Permission Denial: can't access SurfaceFlinger pid=%d, uid=%d",
@@ -5898,8 +5927,11 @@ status_t SurfaceFlinger::captureScreenCommon(RenderAreaFuture renderAreaFuture,
     const status_t bufferStatus = buffer->initCheck();
     LOG_ALWAYS_FATAL_IF(bufferStatus != OK, "captureScreenCommon: Buffer failed to allocate: %d",
                         bufferStatus);
-    return captureScreenCommon(std::move(renderAreaFuture), traverseLayers, buffer,
-                               false /* regionSampling */, grayscale, captureListener);
+    getRenderEngine().cacheExternalTextureBuffer(buffer);
+    status_t result = captureScreenCommon(std::move(renderAreaFuture), traverseLayers, buffer,
+                                          false /* regionSampling */, grayscale, captureListener);
+    getRenderEngine().unbindExternalTextureBuffer(buffer->getId());
+    return result;
 }
 
 status_t SurfaceFlinger::captureScreenCommon(RenderAreaFuture renderAreaFuture,
@@ -5938,15 +5970,6 @@ status_t SurfaceFlinger::captureScreenCommon(RenderAreaFuture renderAreaFuture,
             result = renderScreenImplLocked(*renderArea, traverseLayers, buffer, forSystem,
                                             regionSampling, grayscale, captureResults);
         });
-
-        // TODO(b/180767535): Remove this once we optimize buffer lifecycle for RenderEngine
-        // Only do this when we're not doing region sampling, to allow the region sampling thread to
-        // manage buffer lifecycle itself.
-        if (!regionSampling &&
-            getRenderEngine().getRenderEngineType() ==
-                    renderengine::RenderEngine::RenderEngineType::SKIA_GL_THREADED) {
-            getRenderEngine().unbindExternalTextureBuffer(buffer->getId());
-        }
 
         captureResults.result = result;
         captureListener->onScreenCaptureCompleted(captureResults);

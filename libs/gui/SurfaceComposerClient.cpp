@@ -292,8 +292,11 @@ void TransactionCompletedListener::onTransactionCompleted(ListenerStats listener
                 // callback and a release buffer callback happening at the same time to avoid an
                 // additional ipc call from the server.
                 if (surfaceStats.previousBufferId) {
-                    ReleaseBufferCallback callback =
-                            popReleaseBufferCallbackLocked(surfaceStats.previousBufferId);
+                    ReleaseBufferCallback callback;
+                    {
+                        std::scoped_lock<std::mutex> lock(mMutex);
+                        callback = popReleaseBufferCallbackLocked(surfaceStats.previousBufferId);
+                    }
                     if (callback) {
                         callback(surfaceStats.previousBufferId,
                                  surfaceStats.previousReleaseFence
@@ -1618,20 +1621,7 @@ SurfaceComposerClient::Transaction& SurfaceComposerClient::Transaction::setFixed
 
 SurfaceComposerClient::Transaction& SurfaceComposerClient::Transaction::setFrameTimelineInfo(
         const FrameTimelineInfo& frameTimelineInfo) {
-    mFrameTimelineInfo = frameTimelineInfo;
-    return *this;
-}
-
-SurfaceComposerClient::Transaction& SurfaceComposerClient::Transaction::setFrameTimelineInfo(
-        const sp<SurfaceControl>& sc, const FrameTimelineInfo& frameTimelineInfo) {
-    layer_state_t* s = getLayerState(sc);
-    if (!s) {
-        mStatus = BAD_INDEX;
-        return *this;
-    }
-
-    s->what |= layer_state_t::eFrameTimelineInfoChanged;
-    s->frameTimelineInfo = frameTimelineInfo;
+    mFrameTimelineInfo.merge(frameTimelineInfo);
     return *this;
 }
 
@@ -1993,6 +1983,11 @@ status_t SurfaceComposerClient::clearAnimationFrameStats() {
 
 status_t SurfaceComposerClient::getAnimationFrameStats(FrameStats* outStats) {
     return ComposerService::getComposerService()->getAnimationFrameStats(outStats);
+}
+
+status_t SurfaceComposerClient::overrideHdrTypes(const sp<IBinder>& display,
+                                                 const std::vector<ui::Hdr>& hdrTypes) {
+    return ComposerService::getComposerService()->overrideHdrTypes(display, hdrTypes);
 }
 
 status_t SurfaceComposerClient::getDisplayedContentSamplingAttributes(const sp<IBinder>& display,

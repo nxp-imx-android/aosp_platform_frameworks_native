@@ -130,8 +130,7 @@ void BLASTBufferItemConsumer::onSidebandStreamChanged() {
 }
 
 BLASTBufferQueue::BLASTBufferQueue(const std::string& name, const sp<SurfaceControl>& surface,
-                                   int width, int height, int32_t format,
-                                   bool enableTripleBuffering)
+                                   int width, int height, int32_t format)
       : mName(name),
         mSurfaceControl(surface),
         mSize(width, height),
@@ -143,9 +142,8 @@ BLASTBufferQueue::BLASTBufferQueue(const std::string& name, const sp<SurfaceCont
     // explicitly so that dequeueBuffer will block
     mProducer->setDequeueTimeout(std::numeric_limits<int64_t>::max());
 
-    if (enableTripleBuffering) {
-        mProducer->setMaxDequeuedBufferCount(2);
-    }
+    // safe default, most producers are expected to override this
+    mProducer->setMaxDequeuedBufferCount(2);
     mBufferItemConsumer = new BLASTBufferItemConsumer(mConsumer,
                                                       GraphicBuffer::USAGE_HW_COMPOSER |
                                                               GraphicBuffer::USAGE_HW_TEXTURE,
@@ -401,7 +399,7 @@ void BLASTBufferQueue::processNextBufferLocked(bool useNextTransaction) {
     t->setFrameNumber(mSurfaceControl, bufferItem.mFrameNumber);
 
     if (!mNextFrameTimelineInfoQueue.empty()) {
-        t->setFrameTimelineInfo(mSurfaceControl, mNextFrameTimelineInfoQueue.front());
+        t->setFrameTimelineInfo(mNextFrameTimelineInfoQueue.front());
         mNextFrameTimelineInfoQueue.pop();
     }
 
@@ -608,7 +606,9 @@ void BLASTBufferQueue::mergeWithNextTransaction(SurfaceComposerClient::Transacti
         // Apply the transaction since we have already acquired the desired frame.
         t->apply();
     } else {
-        mPendingTransactions.emplace_back(frameNumber, std::move(*t));
+        mPendingTransactions.emplace_back(frameNumber, *t);
+        // Clear the transaction so it can't be applied elsewhere.
+        t->clear();
     }
 }
 

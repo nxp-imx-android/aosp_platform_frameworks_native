@@ -268,6 +268,23 @@ EGLConfig SkiaGLRenderEngine::chooseEglConfig(EGLDisplay display, int format, bo
     return config;
 }
 
+sk_sp<SkData> SkiaGLRenderEngine::SkSLCacheMonitor::load(const SkData& key) {
+    // This "cache" does not actually cache anything. It just allows us to
+    // monitor Skia's internal cache. So this method always returns null.
+    return nullptr;
+}
+
+void SkiaGLRenderEngine::SkSLCacheMonitor::store(const SkData& key, const SkData& data,
+                                                 const SkString& description) {
+    mShadersCachedSinceLastCall++;
+}
+
+void SkiaGLRenderEngine::assertShadersCompiled(int numShaders) {
+    const int cached = mSkSLCacheMonitor.shadersCachedSinceLastCall();
+    LOG_ALWAYS_FATAL_IF(cached != numShaders, "Attempted to cache %i shaders; cached %i",
+                        numShaders, cached);
+}
+
 SkiaGLRenderEngine::SkiaGLRenderEngine(const RenderEngineCreationArgs& args, EGLDisplay display,
                                        EGLContext ctxt, EGLSurface placeholder,
                                        EGLContext protectedContext, EGLSurface protectedPlaceholder)
@@ -284,6 +301,7 @@ SkiaGLRenderEngine::SkiaGLRenderEngine(const RenderEngineCreationArgs& args, EGL
     GrContextOptions options;
     options.fPreferExternalImagesOverES3 = true;
     options.fDisableDistanceFieldPaths = true;
+    options.fPersistentCache = &mSkSLCacheMonitor;
     mGrContext = GrDirectContext::MakeGL(glInterface, options);
     if (useProtectedContext(true)) {
         mProtectedGrContext = GrDirectContext::MakeGL(glInterface, options);
@@ -298,11 +316,9 @@ SkiaGLRenderEngine::SkiaGLRenderEngine(const RenderEngineCreationArgs& args, EGL
 }
 
 SkiaGLRenderEngine::~SkiaGLRenderEngine() {
-    std::lock_guard<std::mutex> lock(mRenderingMutex);
-    mRuntimeEffects.clear();
-    mProtectedTextureCache.clear();
-    mTextureCache.clear();
+    cleanFramebufferCache();
 
+    std::lock_guard<std::mutex> lock(mRenderingMutex);
     if (mBlurFilter) {
         delete mBlurFilter;
     }
@@ -463,18 +479,31 @@ void SkiaGLRenderEngine::cacheExternalTextureBuffer(const sp<GraphicBuffer>& buf
     }
     ATRACE_CALL();
 
-    std::lock_guard<std::mutex> lock(mRenderingMutex);
-    auto iter = mTextureCache.find(buffer->getId());
-    if (iter != mTextureCache.end()) {
-        ALOGV("Texture already exists in cache.");
+    // We need to switch the currently bound context if the buffer is protected but the current
+    // context is not. The current state must then be restored after the buffer is cached.
+    const bool protectedContextState = mInProtectedContext;
+    if (!useProtectedContext(protectedContextState ||
+                             (buffer->getUsage() & GRALLOC_USAGE_PROTECTED))) {
+        ALOGE("Attempting to cache a buffer into a different context than what is currently bound");
         return;
+    }
+
+    auto grContext = mInProtectedContext ? mProtectedGrContext : mGrContext;
+    auto& cache = mInProtectedContext ? mProtectedTextureCache : mTextureCache;
+
+    std::lock_guard<std::mutex> lock(mRenderingMutex);
+    auto iter = cache.find(buffer->getId());
+    if (iter != cache.end()) {
+        ALOGV("Texture already exists in cache.");
     } else {
         std::shared_ptr<AutoBackendTexture::LocalRef> imageTextureRef =
                 std::make_shared<AutoBackendTexture::LocalRef>();
         imageTextureRef->setTexture(
-                new AutoBackendTexture(mGrContext.get(), buffer->toAHardwareBuffer(), false));
-        mTextureCache.insert({buffer->getId(), imageTextureRef});
+                new AutoBackendTexture(grContext.get(), buffer->toAHardwareBuffer()));
+        cache.insert({buffer->getId(), imageTextureRef});
     }
+    // restore the original state of the protected context if necessary
+    useProtectedContext(protectedContextState);
 }
 
 void SkiaGLRenderEngine::unbindExternalTextureBuffer(uint64_t bufferId) {
@@ -624,7 +653,7 @@ status_t SkiaGLRenderEngine::drawLayers(const DisplaySettings& display,
         ATRACE_NAME("Cache miss");
         surfaceTextureRef = std::make_shared<AutoBackendTexture::LocalRef>();
         surfaceTextureRef->setTexture(
-                new AutoBackendTexture(grContext.get(), buffer->toAHardwareBuffer(), true));
+                new AutoBackendTexture(grContext.get(), buffer->toAHardwareBuffer()));
         if (useFramebufferCache) {
             ALOGD("Adding to cache");
             cache.insert({buffer->getId(), surfaceTextureRef});
@@ -797,6 +826,8 @@ status_t SkiaGLRenderEngine::drawLayers(const DisplaySettings& display,
             const auto rect = layer->geometry.roundedCornersRadius > 0
                     ? getSkRect(layer->geometry.roundedCornersCrop)
                     : bounds;
+            // This would require a new parameter/flag to SkShadowUtils::DrawShadow
+            LOG_ALWAYS_FATAL_IF(layer->disableBlending, "Cannot disableBlending with a shadow");
             drawShadow(canvas, rect, layer->geometry.roundedCornersRadius, layer->shadow);
             continue;
         }
@@ -806,7 +837,7 @@ status_t SkiaGLRenderEngine::drawLayers(const DisplaySettings& display,
                  needsToneMapping(layer->sourceDataspace, display.outputDataspace));
 
         // quick abort from drawing the remaining portion of the layer
-        if (layer->alpha == 0 && !requiresLinearEffect &&
+        if (layer->alpha == 0 && !requiresLinearEffect && !layer->disableBlending &&
             (!displayColorTransform || displayColorTransform->isAlphaUnchanged())) {
             continue;
         }
@@ -824,15 +855,14 @@ status_t SkiaGLRenderEngine::drawLayers(const DisplaySettings& display,
             validateInputBufferUsage(layer->source.buffer.buffer);
             const auto& item = layer->source.buffer;
             std::shared_ptr<AutoBackendTexture::LocalRef> imageTextureRef = nullptr;
-            auto iter = mTextureCache.find(item.buffer->getId());
-            if (iter != mTextureCache.end()) {
+            auto iter = cache.find(item.buffer->getId());
+            if (iter != cache.end()) {
                 imageTextureRef = iter->second;
             } else {
                 imageTextureRef = std::make_shared<AutoBackendTexture::LocalRef>();
-                imageTextureRef->setTexture(new AutoBackendTexture(grContext.get(),
-                                                                   item.buffer->toAHardwareBuffer(),
-                                                                   false));
-                mTextureCache.insert({item.buffer->getId(), imageTextureRef});
+                imageTextureRef->setTexture(
+                        new AutoBackendTexture(grContext.get(), item.buffer->toAHardwareBuffer()));
+                cache.insert({item.buffer->getId(), imageTextureRef});
             }
 
             sk_sp<SkImage> image =
@@ -910,6 +940,10 @@ status_t SkiaGLRenderEngine::drawLayers(const DisplaySettings& display,
             paint.setShader(createRuntimeEffectShader(shader, layer, display,
                                                       /* undoPremultipliedAlpha */ false,
                                                       requiresLinearEffect));
+        }
+
+        if (layer->disableBlending) {
+            paint.setBlendMode(SkBlendMode::kSrc);
         }
 
         paint.setColorFilter(displayColorTransform);
@@ -1137,7 +1171,14 @@ EGLSurface SkiaGLRenderEngine::createPlaceholderEglPbufferSurface(EGLDisplay dis
     return eglCreatePbufferSurface(display, placeholderConfig, attributes.data());
 }
 
-void SkiaGLRenderEngine::cleanFramebufferCache() {}
+void SkiaGLRenderEngine::cleanFramebufferCache() {
+    // TODO(b/180767535) Remove this method and use b/180767535 instead, which would allow
+    // SF to control texture lifecycle more tightly rather than through custom hooks into RE.
+    std::lock_guard<std::mutex> lock(mRenderingMutex);
+    mRuntimeEffects.clear();
+    mProtectedTextureCache.clear();
+    mTextureCache.clear();
+}
 
 int SkiaGLRenderEngine::getContextPriority() {
     int value;
@@ -1157,6 +1198,8 @@ void SkiaGLRenderEngine::dump(std::string& result) {
     StringAppendF(&result, "RenderEngine supports protected context: %d\n",
                   supportsProtectedContent());
     StringAppendF(&result, "RenderEngine is in protected context: %d\n", mInProtectedContext);
+    StringAppendF(&result, "RenderEngine shaders cached since last dump/primeCache: %d\n",
+                  mSkSLCacheMonitor.shadersCachedSinceLastCall());
 
     {
         std::lock_guard<std::mutex> lock(mRenderingMutex);

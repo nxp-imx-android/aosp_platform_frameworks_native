@@ -529,9 +529,6 @@ public:
         // to the transaction, and the input event id that identifies the input event that caused
         // the current frame.
         Transaction& setFrameTimelineInfo(const FrameTimelineInfo& frameTimelineInfo);
-        // Variant that only applies to a specific SurfaceControl.
-        Transaction& setFrameTimelineInfo(const sp<SurfaceControl>& sc,
-                                          const FrameTimelineInfo& frameTimelineInfo);
 
         // Indicates that the consumer should acquire the next frame as soon as it
         // can and not wait for a frame to become available. This is only relevant
@@ -574,6 +571,9 @@ public:
     status_t getLayerFrameStats(const sp<IBinder>& token, FrameStats* outStats) const;
     static status_t clearAnimationFrameStats();
     static status_t getAnimationFrameStats(FrameStats* outStats);
+
+    static status_t overrideHdrTypes(const sp<IBinder>& display,
+                                     const std::vector<ui::Hdr>& hdrTypes);
 
     static void setDisplayProjection(const sp<IBinder>& token, ui::Rotation orientation,
                                      const Rect& layerStackRect, const Rect& displayRect);
