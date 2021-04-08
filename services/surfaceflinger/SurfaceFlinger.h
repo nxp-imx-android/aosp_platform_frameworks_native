@@ -90,6 +90,7 @@ namespace android {
 class Client;
 class EventThread;
 class FpsReporter;
+class HdrLayerInfoReporter;
 class HWComposer;
 struct SetInputWindowsListener;
 class IGraphicBufferProducer;
@@ -329,7 +330,7 @@ public:
     // Otherwise, returns a weak reference so that callers off the main-thread
     // won't accidentally hold onto the last strong reference.
     wp<Layer> fromHandle(const sp<IBinder>& handle);
-    wp<Layer> fromHandleLocked(const sp<IBinder>& handle) REQUIRES(mStateLock);
+    wp<Layer> fromHandleLocked(const sp<IBinder>& handle) const REQUIRES(mStateLock);
 
     // Inherit from ClientCache::ErasedRecipient
     void bufferErased(const client_cache_t& clientCacheId) override;
@@ -536,6 +537,8 @@ private:
                 originUid(originUid),
                 id(transactionId) {}
 
+        void traverseStatesWithBuffers(std::function<void(const layer_state_t&)> visitor);
+
         FrameTimelineInfo frameTimelineInfo;
         Vector<ComposerState> states;
         Vector<DisplayState> displays;
@@ -684,11 +687,15 @@ private:
                                          bool* outSupport) const override;
     status_t setDisplayBrightness(const sp<IBinder>& displayToken,
                                   const gui::DisplayBrightness& brightness) override;
+    status_t addHdrLayerInfoListener(const sp<IBinder>& displayToken,
+                                     const sp<gui::IHdrLayerInfoListener>& listener) override;
+    status_t removeHdrLayerInfoListener(const sp<IBinder>& displayToken,
+                                        const sp<gui::IHdrLayerInfoListener>& listener) override;
     status_t notifyPowerBoost(int32_t boostId) override;
     status_t setGlobalShadowSettings(const half4& ambientColor, const half4& spotColor,
                                      float lightPosY, float lightPosZ, float lightRadius) override;
     status_t setFrameRate(const sp<IGraphicBufferProducer>& surface, float frameRate,
-                          int8_t compatibility, bool shouldBeSeamless) override;
+                          int8_t compatibility, int8_t changeFrameRateStrategy) override;
     status_t acquireFrameRateFlexibilityToken(sp<IBinder>* outToken) override;
 
     status_t setFrameTimelineInfo(const sp<IGraphicBufferProducer>& surface,
@@ -841,8 +848,8 @@ private:
     bool transactionIsReadyToBeApplied(
             const FrameTimelineInfo& info, bool isAutoTimestamp, int64_t desiredPresentTime,
             uid_t originUid, const Vector<ComposerState>& states,
-            std::unordered_set<sp<IBinder>, ISurfaceComposer::SpHash<IBinder>>& pendingBuffers)
-            REQUIRES(mStateLock);
+            const std::unordered_set<sp<IBinder>, ISurfaceComposer::SpHash<IBinder>>&
+                    bufferLayersReadyToPresent) const REQUIRES(mStateLock);
     uint32_t setDisplayStateLocked(const DisplayState& s) REQUIRES(mStateLock);
     uint32_t addInputWindowCommands(const InputWindowCommands& inputWindowCommands)
             REQUIRES(mStateLock);
@@ -908,6 +915,7 @@ private:
                                     bool grayscale, ScreenCaptureResults&);
 
     sp<DisplayDevice> getDisplayByIdOrLayerStack(uint64_t displayOrLayerStack) REQUIRES(mStateLock);
+    sp<DisplayDevice> getDisplayById(DisplayId displayId) const REQUIRES(mStateLock);
     sp<DisplayDevice> getDisplayByLayerStack(uint64_t layerStack) REQUIRES(mStateLock);
 
     // If the uid provided is not UNSET_UID, the traverse will skip any layers that don't have a
@@ -1013,9 +1021,14 @@ private:
 
     bool isDisplayModeAllowed(DisplayModeId) const REQUIRES(mStateLock);
 
+    struct FenceWithFenceTime {
+        sp<Fence> fence = Fence::NO_FENCE;
+        std::shared_ptr<FenceTime> fenceTime = FenceTime::NO_FENCE;
+    };
+
     // Gets the fence for the previous frame.
     // Must be called on the main thread.
-    sp<Fence> previousFrameFence();
+    FenceWithFenceTime previousFrameFence();
 
     // Whether the previous frame has not yet been presented to the display.
     // If graceTimeMs is positive, this method waits for at most the provided
@@ -1193,7 +1206,7 @@ private:
     std::unordered_set<sp<Layer>, ISurfaceComposer::SpHash<Layer>> mLayersWithQueuedFrames;
     // Tracks layers that need to update a display's dirty region.
     std::vector<sp<Layer>> mLayersPendingRefresh;
-    std::array<sp<Fence>, 2> mPreviousPresentFences = {Fence::NO_FENCE, Fence::NO_FENCE};
+    std::array<FenceWithFenceTime, 2> mPreviousPresentFences;
     // True if in the previous frame at least one layer was composed via the GPU.
     bool mHadClientComposition = false;
     // True if in the previous frame at least one layer was composed via HW Composer.
@@ -1386,6 +1399,9 @@ private:
     sp<IBinder> mDebugFrameRateFlexibilityToken;
 
     BufferCountTracker mBufferCountTracker;
+
+    std::unordered_map<DisplayId, sp<HdrLayerInfoReporter>> mHdrLayerInfoListeners
+            GUARDED_BY(mStateLock);
 };
 
 } // namespace android

@@ -185,10 +185,14 @@ std::optional<compositionengine::LayerFE::LayerSettings> BufferLayer::prepareCli
             return std::nullopt;
         }
     }
-    bool blackOutLayer = (isProtected() && !targetSettings.supportsProtectedContent) ||
+    const bool blackOutLayer = (isProtected() && !targetSettings.supportsProtectedContent) ||
             (isSecure() && !targetSettings.isSecure);
+    const bool bufferCanBeUsedAsHwTexture =
+            mBufferInfo.mBuffer->getUsage() & GraphicBuffer::USAGE_HW_TEXTURE;
     compositionengine::LayerFE::LayerSettings& layer = *result;
-    if (blackOutLayer) {
+    if (blackOutLayer || !bufferCanBeUsedAsHwTexture) {
+        ALOGE_IF(!bufferCanBeUsedAsHwTexture, "%s is blacked out as buffer is not gpu readable",
+                 mName.c_str());
         prepareClearClientComposition(layer, true /* blackout */);
         return layer;
     }
@@ -325,6 +329,37 @@ bool BufferLayer::onPreComposition(nsecs_t refreshStartTime) {
     mRefreshPending = false;
     return hasReadyFrame();
 }
+namespace {
+TimeStats::SetFrameRateVote frameRateToSetFrameRateVotePayload(Layer::FrameRate frameRate) {
+    using FrameRateCompatibility = TimeStats::SetFrameRateVote::FrameRateCompatibility;
+    using Seamlessness = TimeStats::SetFrameRateVote::Seamlessness;
+    const auto frameRateCompatibility = [frameRate] {
+        switch (frameRate.type) {
+            case Layer::FrameRateCompatibility::Default:
+                return FrameRateCompatibility::Default;
+            case Layer::FrameRateCompatibility::ExactOrMultiple:
+                return FrameRateCompatibility::ExactOrMultiple;
+            default:
+                return FrameRateCompatibility::Undefined;
+        }
+    }();
+
+    const auto seamlessness = [frameRate] {
+        switch (frameRate.seamlessness) {
+            case scheduler::Seamlessness::OnlySeamless:
+                return Seamlessness::ShouldBeSeamless;
+            case scheduler::Seamlessness::SeamedAndSeamless:
+                return Seamlessness::NotRequired;
+            default:
+                return Seamlessness::Undefined;
+        }
+    }();
+
+    return TimeStats::SetFrameRateVote{.frameRate = frameRate.rate.getValue(),
+                                       .frameRateCompatibility = frameRateCompatibility,
+                                       .seamlessness = seamlessness};
+}
+} // namespace
 
 bool BufferLayer::onPostComposition(const DisplayDevice* display,
                                     const std::shared_ptr<FenceTime>& glDoneFence,
@@ -377,7 +412,9 @@ bool BufferLayer::onPostComposition(const DisplayDevice* display,
     const std::optional<Fps> renderRate = mFlinger->mScheduler->getFrameRateOverride(getOwnerUid());
     if (presentFence->isValid()) {
         mFlinger->mTimeStats->setPresentFence(layerId, mCurrentFrameNumber, presentFence,
-                                              refreshRate, renderRate);
+                                              refreshRate, renderRate,
+                                              frameRateToSetFrameRateVotePayload(
+                                                      mDrawingState.frameRate));
         mFlinger->mFrameTracer->traceFence(layerId, getCurrentBufferId(), mCurrentFrameNumber,
                                            presentFence, FrameTracer::FrameEvent::PRESENT_FENCE);
         mFrameTracker.setActualPresentFence(std::shared_ptr<FenceTime>(presentFence));
@@ -389,7 +426,9 @@ bool BufferLayer::onPostComposition(const DisplayDevice* display,
         // timestamp instead.
         const nsecs_t actualPresentTime = display->getRefreshTimestamp();
         mFlinger->mTimeStats->setPresentTime(layerId, mCurrentFrameNumber, actualPresentTime,
-                                             refreshRate, renderRate);
+                                             refreshRate, renderRate,
+                                             frameRateToSetFrameRateVotePayload(
+                                                     mDrawingState.frameRate));
         mFlinger->mFrameTracer->traceTimestamp(layerId, getCurrentBufferId(), mCurrentFrameNumber,
                                                actualPresentTime,
                                                FrameTracer::FrameEvent::PRESENT_FENCE);

@@ -294,12 +294,13 @@ SkiaGLRenderEngine::SkiaGLRenderEngine(const RenderEngineCreationArgs& args, EGL
         mPlaceholderSurface(placeholder),
         mProtectedEGLContext(protectedContext),
         mProtectedPlaceholderSurface(protectedPlaceholder),
+        mDefaultPixelFormat(static_cast<PixelFormat>(args.pixelFormat)),
         mUseColorManagement(args.useColorManagement) {
     sk_sp<const GrGLInterface> glInterface(GrGLCreateNativeInterface());
     LOG_ALWAYS_FATAL_IF(!glInterface.get());
 
     GrContextOptions options;
-    options.fPreferExternalImagesOverES3 = true;
+    options.fDisableDriverCorrectnessWorkarounds = true;
     options.fDisableDistanceFieldPaths = true;
     options.fPersistentCache = &mSkSLCacheMonitor;
     mGrContext = GrDirectContext::MakeGL(glInterface, options);
@@ -499,7 +500,7 @@ void SkiaGLRenderEngine::cacheExternalTextureBuffer(const sp<GraphicBuffer>& buf
         std::shared_ptr<AutoBackendTexture::LocalRef> imageTextureRef =
                 std::make_shared<AutoBackendTexture::LocalRef>();
         imageTextureRef->setTexture(
-                new AutoBackendTexture(grContext.get(), buffer->toAHardwareBuffer()));
+                new AutoBackendTexture(grContext.get(), buffer->toAHardwareBuffer(), false));
         cache.insert({buffer->getId(), imageTextureRef});
     }
     // restore the original state of the protected context if necessary
@@ -653,7 +654,7 @@ status_t SkiaGLRenderEngine::drawLayers(const DisplaySettings& display,
         ATRACE_NAME("Cache miss");
         surfaceTextureRef = std::make_shared<AutoBackendTexture::LocalRef>();
         surfaceTextureRef->setTexture(
-                new AutoBackendTexture(grContext.get(), buffer->toAHardwareBuffer()));
+                new AutoBackendTexture(grContext.get(), buffer->toAHardwareBuffer(), true));
         if (useFramebufferCache) {
             ALOGD("Adding to cache");
             cache.insert({buffer->getId(), surfaceTextureRef});
@@ -860,8 +861,9 @@ status_t SkiaGLRenderEngine::drawLayers(const DisplaySettings& display,
                 imageTextureRef = iter->second;
             } else {
                 imageTextureRef = std::make_shared<AutoBackendTexture::LocalRef>();
-                imageTextureRef->setTexture(
-                        new AutoBackendTexture(grContext.get(), item.buffer->toAHardwareBuffer()));
+                imageTextureRef->setTexture(new AutoBackendTexture(grContext.get(),
+                                                                   item.buffer->toAHardwareBuffer(),
+                                                                   false));
                 cache.insert({item.buffer->getId(), imageTextureRef});
             }
 
@@ -1184,6 +1186,27 @@ int SkiaGLRenderEngine::getContextPriority() {
     int value;
     eglQueryContext(mEGLDisplay, mEGLContext, EGL_CONTEXT_PRIORITY_LEVEL_IMG, &value);
     return value;
+}
+
+void SkiaGLRenderEngine::onPrimaryDisplaySizeChanged(ui::Size size) {
+    // This cache multiplier was selected based on review of cache sizes relative
+    // to the screen resolution. Looking at the worst case memory needed by blur (~1.5x),
+    // shadows (~1x), and general data structures (e.g. vertex buffers) we selected this as a
+    // conservative default based on that analysis.
+    const float SURFACE_SIZE_MULTIPLIER = 3.5f * bytesPerPixel(mDefaultPixelFormat);
+    const int maxResourceBytes = size.width * size.height * SURFACE_SIZE_MULTIPLIER;
+
+    // start by resizing the current context
+    auto grContext = mInProtectedContext ? mProtectedGrContext : mGrContext;
+    grContext->setResourceCacheLimit(maxResourceBytes);
+
+    // if it is possible to switch contexts then we will resize the other context
+    if (useProtectedContext(!mInProtectedContext)) {
+        grContext = mInProtectedContext ? mProtectedGrContext : mGrContext;
+        grContext->setResourceCacheLimit(maxResourceBytes);
+        // reset back to the initial context that was active when this method was called
+        useProtectedContext(!mInProtectedContext);
+    }
 }
 
 void SkiaGLRenderEngine::dump(std::string& result) {
