@@ -412,6 +412,7 @@ public:
     // Used only to set BufferStateLayer state
     virtual bool setTransform(uint32_t /*transform*/) { return false; };
     virtual bool setTransformToDisplayInverse(bool /*transformToDisplayInverse*/) { return false; };
+    virtual bool setFrame(const Rect& /*frame*/) { return false; };
     virtual bool setBuffer(const sp<GraphicBuffer>& /*buffer*/, const sp<Fence>& /*acquireFence*/,
                            nsecs_t /*postTime*/, nsecs_t /*desiredPresentTime*/,
                            bool /*isAutoTimestamp*/, const client_cache_t& /*clientCacheId*/,
@@ -1024,6 +1025,9 @@ protected:
     void removeZOrderRelative(const wp<Layer>& relative);
     compositionengine::OutputLayer* findOutputLayerForDisplay(const DisplayDevice*) const;
     bool usingRelativeZ(LayerVector::StateSet) const;
+
+    virtual ui::Transform getInputTransform() const;
+    virtual Rect getInputBounds() const;
 
     // SyncPoints which will be signaled when the correct frame is at the head
     // of the queue and dropped after the frame has been latched. Protected by
