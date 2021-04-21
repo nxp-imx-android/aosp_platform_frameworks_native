@@ -14,8 +14,7 @@
  * limitations under the License.
  */
 
-#include <thread>
-
+#include <SurfaceFlingerProperties.sysprop.h>
 #include <android-base/stringprintf.h>
 #include <compositionengine/CompositionEngine.h>
 #include <compositionengine/CompositionRefreshArgs.h>
@@ -29,7 +28,9 @@
 #include <compositionengine/impl/OutputLayerCompositionState.h>
 #include <compositionengine/impl/planner/Planner.h>
 
-#include <SurfaceFlingerProperties.sysprop.h>
+#include <thread>
+
+#include "renderengine/ExternalTexture.h"
 
 // TODO(b/129481165): remove the #pragma below and fix conversion issues
 #pragma clang diagnostic push
@@ -710,22 +711,21 @@ void Output::writeCompositionState(const compositionengine::CompositionRefreshAr
         return;
     }
 
+    editState().earliestPresentTime = refreshArgs.earliestPresentTime;
+
     sp<GraphicBuffer> previousOverride = nullptr;
     for (auto* layer : getOutputLayersOrderedByZ()) {
         bool skipLayer = false;
         if (layer->getState().overrideInfo.buffer != nullptr) {
             if (previousOverride != nullptr &&
-                layer->getState().overrideInfo.buffer == previousOverride) {
+                layer->getState().overrideInfo.buffer->getBuffer() == previousOverride) {
                 ALOGV("Skipping redundant buffer");
                 skipLayer = true;
             }
-            previousOverride = layer->getState().overrideInfo.buffer;
+            previousOverride = layer->getState().overrideInfo.buffer->getBuffer();
         }
 
-        // TODO(b/181172795): We now update geometry for all flattened layers. We should update it
-        // only when the geometry actually changes
-        const bool includeGeometry = refreshArgs.updatingGeometryThisFrame ||
-                layer->getState().overrideInfo.buffer != nullptr || skipLayer;
+        const bool includeGeometry = refreshArgs.updatingGeometryThisFrame;
         layer->writeStateToHWC(includeGeometry, skipLayer);
     }
 }
@@ -981,14 +981,15 @@ std::optional<base::unique_fd> Output::composeSurfaces(
     }
 
     base::unique_fd fd;
-    sp<GraphicBuffer> buf;
+
+    std::shared_ptr<renderengine::ExternalTexture> tex;
 
     // If we aren't doing client composition on this output, but do have a
     // flipClientTarget request for this frame on this output, we still need to
     // dequeue a buffer.
     if (hasClientComposition || outputState.flipClientTarget) {
-        buf = mRenderSurface->dequeueBuffer(&fd);
-        if (buf == nullptr) {
+        tex = mRenderSurface->dequeueBuffer(&fd);
+        if (tex == nullptr) {
             ALOGW("Dequeuing buffer for display [%s] failed, bailing out of "
                   "client composition for this frame",
                   mName.c_str());
@@ -1033,13 +1034,14 @@ std::optional<base::unique_fd> Output::composeSurfaces(
     // Check if the client composition requests were rendered into the provided graphic buffer. If
     // so, we can reuse the buffer and avoid client composition.
     if (mClientCompositionRequestCache) {
-        if (mClientCompositionRequestCache->exists(buf->getId(), clientCompositionDisplay,
+        if (mClientCompositionRequestCache->exists(tex->getBuffer()->getId(),
+                                                   clientCompositionDisplay,
                                                    clientCompositionLayers)) {
             outputCompositionState.reusedClientComposition = true;
             setExpensiveRenderingExpected(false);
             return readyFence;
         }
-        mClientCompositionRequestCache->add(buf->getId(), clientCompositionDisplay,
+        mClientCompositionRequestCache->add(tex->getBuffer()->getId(), clientCompositionDisplay,
                                             clientCompositionLayers);
     }
 
@@ -1072,12 +1074,12 @@ std::optional<base::unique_fd> Output::composeSurfaces(
     // over to RenderEngine, in which case this flag can be removed from the drawLayers interface.
     const bool useFramebufferCache = outputState.layerStackInternal;
     status_t status =
-            renderEngine.drawLayers(clientCompositionDisplay, clientCompositionLayerPointers, buf,
+            renderEngine.drawLayers(clientCompositionDisplay, clientCompositionLayerPointers, tex,
                                     useFramebufferCache, std::move(fd), &readyFence);
 
     if (status != NO_ERROR && mClientCompositionRequestCache) {
         // If rendering was not successful, remove the request from the cache.
-        mClientCompositionRequestCache->remove(buf->getId());
+        mClientCompositionRequestCache->remove(tex->getBuffer()->getId());
     }
 
     auto& timeStats = getCompositionEngine().getTimeStats();
@@ -1104,6 +1106,7 @@ std::vector<LayerFE::LayerSettings> Output::generateClientCompositionRequests(
     Region stubRegion;
 
     bool disableBlurs = false;
+    sp<GraphicBuffer> previousOverrideBuffer = nullptr;
 
     for (auto* layer : getOutputLayersOrderedByZ()) {
         const auto& layerState = layer->getState();
@@ -1153,8 +1156,14 @@ std::vector<LayerFE::LayerSettings> Output::generateClientCompositionRequests(
 
             std::vector<LayerFE::LayerSettings> results;
             if (layer->getState().overrideInfo.buffer != nullptr) {
-                results = layer->getOverrideCompositionList();
-                ALOGV("Replacing [%s] with override in RE", layer->getLayerFE().getDebugName());
+                if (layer->getState().overrideInfo.buffer->getBuffer() != previousOverrideBuffer) {
+                    results = layer->getOverrideCompositionList();
+                    previousOverrideBuffer = layer->getState().overrideInfo.buffer->getBuffer();
+                    ALOGV("Replacing [%s] with override in RE", layer->getLayerFE().getDebugName());
+                } else {
+                    ALOGV("Skipping redundant override buffer for [%s] in RE",
+                          layer->getLayerFE().getDebugName());
+                }
             } else {
                 results = layerFE.prepareClientCompositionList(targetSettings);
                 if (realContentIsVisible && !results.empty()) {

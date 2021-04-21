@@ -333,7 +333,11 @@ void OutputLayer::writeStateToHWC(bool includeGeometry, bool skipLayer) {
 
     auto requestedCompositionType = outputIndependentState->compositionType;
 
-    if (includeGeometry) {
+    // TODO(b/181172795): We now update geometry for all flattened layers. We should update it
+    // only when the geometry actually changes
+    const bool isOverridden = state.overrideInfo.buffer != nullptr;
+    const bool prevOverridden = state.hwc->stateOverridden;
+    if (isOverridden || prevOverridden || skipLayer || includeGeometry) {
         writeOutputDependentGeometryStateToHWC(hwcLayer.get(), requestedCompositionType);
         writeOutputIndependentGeometryStateToHWC(hwcLayer.get(), *outputIndependentState,
                                                  skipLayer);
@@ -346,6 +350,8 @@ void OutputLayer::writeStateToHWC(bool includeGeometry, bool skipLayer) {
 
     // Always set the layer color after setting the composition type.
     writeSolidColorStateToHWC(hwcLayer.get(), *outputIndependentState);
+
+    editState().hwc->stateOverridden = isOverridden;
 }
 
 void OutputLayer::writeOutputDependentGeometryStateToHWC(
@@ -531,7 +537,7 @@ void OutputLayer::writeBufferStateToHWC(HWC2::Layer* hwcLayer,
     sp<GraphicBuffer> buffer = outputIndependentState.buffer;
     sp<Fence> acquireFence = outputIndependentState.acquireFence;
     if (getState().overrideInfo.buffer != nullptr) {
-        buffer = getState().overrideInfo.buffer;
+        buffer = getState().overrideInfo.buffer->getBuffer();
         acquireFence = getState().overrideInfo.acquireFence;
     }
 
@@ -693,7 +699,7 @@ std::vector<LayerFE::LayerSettings> OutputLayer::getOverrideCompositionList() co
     settings.geometry = renderengine::Geometry{
             .boundaries = boundaries.toFloatRect(),
     };
-    settings.bufferId = getState().overrideInfo.buffer->getId();
+    settings.bufferId = getState().overrideInfo.buffer->getBuffer()->getId();
     settings.source = renderengine::PixelSource{
             .buffer = renderengine::Buffer{
                     .buffer = getState().overrideInfo.buffer,
