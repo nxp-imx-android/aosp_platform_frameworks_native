@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 The Android Open Source Project
+ * Copyright 2021 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,17 +14,21 @@
  * limitations under the License.
  */
 
-//! Generated Rust bindings to libbinder_ndk
+#pragma once
 
-use std::error::Error;
-use std::fmt;
+#include "../../Clock.h"
 
-include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+namespace android::fake {
 
-impl Error for android_c_interface_StatusCode {}
+class FakeClock : public Clock {
+public:
+    virtual ~FakeClock() = default;
+    std::chrono::steady_clock::time_point now() const override { return mNow; }
 
-impl fmt::Display for android_c_interface_StatusCode {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "StatusCode::{:?}", self)
-    }
-}
+    void advanceTime(std::chrono::nanoseconds delta) { mNow += delta; }
+
+private:
+    std::chrono::steady_clock::time_point mNow;
+};
+
+} // namespace android::fake

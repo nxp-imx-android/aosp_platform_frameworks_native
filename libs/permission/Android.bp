@@ -45,4 +45,5 @@ cc_library_shared {
     static_libs: [
         "framework-permission-aidl-cpp",
     ],
+    export_static_lib_headers: ["framework-permission-aidl-cpp"],
 }

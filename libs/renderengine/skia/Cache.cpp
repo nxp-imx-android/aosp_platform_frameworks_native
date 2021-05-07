@@ -37,12 +37,15 @@ const auto kScaleAndTranslate = mat4(0.7f,   0.f, 0.f, 0.f,
                                      0.f,  0.7f, 0.f, 0.f,
                                      0.f,   0.f, 1.f, 0.f,
                                    67.3f, 52.2f, 0.f, 1.f);
+const auto kScaleYOnly = mat4(1.f,   0.f, 0.f, 0.f,
+                              0.f,  0.7f, 0.f, 0.f,
+                              0.f,   0.f, 1.f, 0.f,
+                              0.f,   0.f, 0.f, 1.f);
 // clang-format on
-// When choosing dataspaces below, whether the match the destination or not determined whether
-// a color correction effect is added to the shader. There may be other additional shader details
-// for particular color spaces.
-// TODO(b/184842383) figure out which color related shaders are necessary
+// When setting layer.sourceDataspace, whether it matches the destination or not determines whether
+// a color correction effect is added to the shader.
 constexpr auto kDestDataSpace = ui::Dataspace::SRGB;
+constexpr auto kOtherDataSpace = ui::Dataspace::DISPLAY_P3;
 } // namespace
 
 static void drawShadowLayers(SkiaRenderEngine* renderengine, const DisplaySettings& display,
@@ -115,20 +118,24 @@ static void drawImageLayers(SkiaRenderEngine* renderengine, const DisplaySetting
 
     // Test both drawRect and drawRRect
     auto layers = std::vector<const LayerSettings*>{&layer};
-    for (bool identity : {true, false}) {
-        layer.geometry.positionTransform = identity ? mat4() : kScaleAndTranslate;
-        // Corner radii less than 0.5 creates a special shader. This likely occurs in real usage
-        // due to animating corner radius.
-        // For the non-idenity matrix, only the large corner radius will create a new shader.
-        for (float roundedCornersRadius : identity ? threeCornerRadii : oneCornerRadius) {
-            // roundedCornersCrop is always set, but it is this radius that triggers the behavior
-            layer.geometry.roundedCornersRadius = roundedCornersRadius;
-            for (bool isOpaque : {true, false}) {
-                layer.source.buffer.isOpaque = isOpaque;
-                for (auto alpha : {half(.23999f), half(1.0f)}) {
-                    layer.alpha = alpha;
-                    renderengine->drawLayers(display, layers, dstTexture, kUseFrameBufferCache,
-                                             base::unique_fd(), nullptr);
+    for (auto dataspace : {kDestDataSpace, kOtherDataSpace}) {
+        layer.sourceDataspace = dataspace;
+        for (bool identity : {true, false}) {
+            layer.geometry.positionTransform = identity ? mat4() : kScaleAndTranslate;
+            // Corner radii less than 0.5 creates a special shader. This likely occurs in real usage
+            // due to animating corner radius.
+            // For the non-idenity matrix, only the large corner radius will create a new shader.
+            for (float roundedCornersRadius : identity ? threeCornerRadii : oneCornerRadius) {
+                // roundedCornersCrop is always set, but it is this radius that triggers the
+                // behavior
+                layer.geometry.roundedCornersRadius = roundedCornersRadius;
+                for (bool isOpaque : {true, false}) {
+                    layer.source.buffer.isOpaque = isOpaque;
+                    for (auto alpha : {half(.23999f), half(1.0f)}) {
+                        layer.alpha = alpha;
+                        renderengine->drawLayers(display, layers, dstTexture, kUseFrameBufferCache,
+                                                 base::unique_fd(), nullptr);
+                    }
                 }
             }
         }
@@ -177,6 +184,37 @@ static void drawBlurLayers(SkiaRenderEngine* renderengine, const DisplaySettings
     auto layers = std::vector<const LayerSettings*>{&layer};
     for (int radius : {9, 60}) {
         layer.backgroundBlurRadius = radius;
+        renderengine->drawLayers(display, layers, dstTexture, kUseFrameBufferCache,
+                                 base::unique_fd(), nullptr);
+    }
+}
+
+static void drawTextureScaleLayers(SkiaRenderEngine* renderengine, const DisplaySettings& display,
+                                   const std::shared_ptr<ExternalTexture>& dstTexture,
+                                   const std::shared_ptr<ExternalTexture>& srcTexture) {
+    const Rect& displayRect = display.physicalDisplay;
+    FloatRect rect(0, 0, displayRect.width(), displayRect.height());
+    LayerSettings layer{
+            .geometry =
+                    Geometry{
+                            .boundaries = rect,
+                            .roundedCornersCrop = rect,
+                            .positionTransform = kScaleAndTranslate,
+                            .roundedCornersRadius = 300,
+                    },
+            .source = PixelSource{.buffer =
+                                          Buffer{
+                                                  .buffer = srcTexture,
+                                                  .maxMasteringLuminance = 1000.f,
+                                                  .maxContentLuminance = 1000.f,
+                                                  .textureTransform = kScaleYOnly,
+                                          }},
+            .sourceDataspace = kOtherDataSpace,
+    };
+
+    auto layers = std::vector<const LayerSettings*>{&layer};
+    for (float alpha : {0.5f, 1.f}) {
+        layer.alpha = alpha,
         renderengine->drawLayers(display, layers, dstTexture, kUseFrameBufferCache,
                                  base::unique_fd(), nullptr);
     }
@@ -249,6 +287,9 @@ void Cache::primeShaderCache(SkiaRenderEngine* renderengine) {
     // TODO(b/184665179) doubles number of image shader compilations, but only somewhere
     // between 6 and 8 will occur in real uses.
     drawImageLayers(renderengine, display, dstTexture, externalTexture);
+
+    // Draw layers for b/185569240.
+    drawTextureScaleLayers(renderengine, display, dstTexture, externalTexture);
 
     const nsecs_t timeAfter = systemTime();
     const float compileTimeMs = static_cast<float>(timeAfter - timeBefore) / 1.0E6;
