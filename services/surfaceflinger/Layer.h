@@ -239,8 +239,8 @@ public:
 
         FrameRate frameRate;
 
-        // Indicates whether parents / children of this layer had set FrameRate
-        bool treeHasFrameRateVote;
+        // The combined frame rate of parents / children of this layer
+        FrameRate frameRateForLayerTree;
 
         // Set by window manager indicating the layer and all its children are
         // in a different orientation than the display. The hint suggests that
@@ -276,6 +276,7 @@ public:
         StretchEffect stretchEffect;
 
         Rect bufferCrop;
+        Rect destinationFrame;
     };
 
     /*
@@ -646,16 +647,6 @@ public:
     // Compute bounds for the layer and cache the results.
     void computeBounds(FloatRect parentBounds, ui::Transform parentTransform, float shadowRadius);
 
-    // Returns the buffer scale transform if a scaling mode is set.
-    ui::Transform getBufferScaleTransform() const;
-
-    // Get effective layer transform, taking into account all its parent transform with any
-    // scaling if the parent scaling more is not NATIVE_WINDOW_SCALING_MODE_FREEZE.
-    ui::Transform getTransformWithScale(const ui::Transform& bufferScaleTransform) const;
-
-    // Returns the bounds of the layer without any buffer scaling.
-    FloatRect getBoundsPreScaling(const ui::Transform& bufferScaleTransform) const;
-
     int32_t getSequence() const override { return sequence; }
 
     // For tracing.
@@ -885,8 +876,10 @@ public:
     StretchEffect getStretchEffect() const;
 
     virtual bool setBufferCrop(const Rect& /* bufferCrop */) { return false; }
+    virtual bool setDestinationFrame(const Rect& /* destinationFrame */) { return false; }
     virtual std::atomic<int32_t>* getPendingBufferCounter() { return nullptr; }
     virtual std::string getPendingBufferCounterName() { return ""; }
+    virtual void updateGeometry() {}
 
 protected:
     friend class impl::SurfaceInterceptor;
@@ -1063,6 +1056,8 @@ private:
 
     // Fills in the frame and transform info for the InputWindowInfo
     void fillInputFrameInfo(InputWindowInfo& info, const ui::Transform& toPhysicalDisplay);
+
+    bool updateFrameRateForLayerTree(bool treeHasFrameRateVote);
 
     // Cached properties computed from drawing state
     // Effective transform taking into account parent transforms and any parent scaling, which is

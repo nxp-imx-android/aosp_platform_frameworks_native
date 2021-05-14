@@ -381,6 +381,12 @@ SurfaceFlinger::SurfaceFlinger(Factory& factory) : SurfaceFlinger(factory, SkipI
     mColorSpaceAgnosticDataspace =
             static_cast<ui::Dataspace>(color_space_agnostic_dataspace(Dataspace::UNKNOWN));
 
+    mLayerCachingEnabled = [] {
+        const bool enable =
+                android::sysprop::SurfaceFlingerProperties::enable_layer_caching().value_or(false);
+        return base::GetBoolProperty(std::string("debug.sf.enable_layer_caching"), enable);
+    }();
+
     useContextPriority = use_context_priority(true);
 
     using Values = SurfaceFlingerProperties::primary_display_orientation_values;
@@ -2642,6 +2648,7 @@ void SurfaceFlinger::processDisplayAdded(const wp<IBinder>& displayToken,
     builder.setGpuVirtualDisplayIdGenerator(mGpuVirtualDisplayIdGenerator);
     builder.setName(state.displayName);
     const auto compositionDisplay = getCompositionEngine().createDisplay(builder.build());
+    compositionDisplay->setLayerCachingEnabled(mLayerCachingEnabled);
 
     sp<compositionengine::DisplaySurface> displaySurface;
     sp<IGraphicBufferProducer> producer;
@@ -2816,16 +2823,19 @@ void SurfaceFlinger::processDisplayChangesLocked() {
 }
 
 void SurfaceFlinger::handleTransactionLocked(uint32_t transactionFlags) {
-    /*
-     * Traversal of the children
-     * (perform the transaction for each of them if needed)
-     */
+    // Commit display transactions
+    const bool displayTransactionNeeded = transactionFlags & eDisplayTransactionNeeded;
+    if (displayTransactionNeeded) {
+        processDisplayChangesLocked();
+        processDisplayHotplugEventsLocked();
+    }
 
-    if ((transactionFlags & eTraversalNeeded) || mForceTraversal) {
-        mForceTraversal = false;
+    // Commit layer transactions. This needs to happen after display transactions are
+    // committed because some geometry logic relies on display orientation.
+    if ((transactionFlags & eTraversalNeeded) || mForceTraversal || displayTransactionNeeded) {
         mCurrentState.traverse([&](Layer* layer) {
             uint32_t trFlags = layer->getTransactionFlags(eTransactionNeeded);
-            if (!trFlags) return;
+            if (!trFlags && !displayTransactionNeeded) return;
 
             const uint32_t flags = layer->doTransaction(0);
             if (flags & Layer::eVisibleRegion)
@@ -2837,15 +2847,7 @@ void SurfaceFlinger::handleTransactionLocked(uint32_t transactionFlags) {
         });
     }
 
-    /*
-     * Perform display own transactions if needed
-     */
-
-    if (transactionFlags & eDisplayTransactionNeeded) {
-        processDisplayChangesLocked();
-        processDisplayHotplugEventsLocked();
-    }
-
+    // Update transform hint
     if (transactionFlags & (eTransformHintUpdateNeeded | eDisplayTransactionNeeded)) {
         // The transform hint might have changed for some layers
         // (either because a display has changed, or because a layer
@@ -4039,6 +4041,11 @@ uint32_t SurfaceFlinger::setClientStateLocked(
             flags |= eTraversalNeeded;
         }
     }
+    if (what & layer_state_t::eDestinationFrameChanged) {
+        if (layer->setDestinationFrame(s.destinationFrame)) {
+            flags |= eTraversalNeeded;
+        }
+    }
     // This has to happen after we reparent children because when we reparent to null we remove
     // child layers from current state and remove its relative z. If the children are reparented in
     // the same transaction, then we have to make sure we reparent the children first so we do not
@@ -5187,9 +5194,9 @@ status_t SurfaceFlinger::CheckTransactCodeCredentials(uint32_t code) {
         code == IBinder::SYSPROPS_TRANSACTION) {
         return OK;
     }
-    // Numbers from 1000 to 1038 are currently used for backdoors. The code
+    // Numbers from 1000 to 1040 are currently used for backdoors. The code
     // in onTransact verifies that the user is root, and has access to use SF.
-    if (code >= 1000 && code <= 1039) {
+    if (code >= 1000 && code <= 1040) {
         ALOGV("Accessing SurfaceFlinger through backdoor code: %u", code);
         return OK;
     }
@@ -5584,6 +5591,36 @@ status_t SurfaceFlinger::onTransact(uint32_t code, const Parcel& data, Parcel* r
                 const auto refreshRate = data.readFloat();
                 mScheduler->setPreferredRefreshRateForUid(FrameRateOverride{inUid, refreshRate});
                 mScheduler->onFrameRateOverridesChanged(mAppConnectionHandle, displayId);
+                return NO_ERROR;
+            }
+            // Toggle caching feature
+            // First argument is an int32 - nonzero enables caching and zero disables caching
+            // Second argument is an optional uint64 - if present, then limits enabling/disabling
+            // caching to a particular physical display
+            case 1040: {
+                n = data.readInt32();
+                std::optional<PhysicalDisplayId> inputId = std::nullopt;
+                if (uint64_t inputDisplayId; data.readUint64(&inputDisplayId) == NO_ERROR) {
+                    const auto token =
+                            getPhysicalDisplayToken(static_cast<PhysicalDisplayId>(inputDisplayId));
+                    if (!token) {
+                        ALOGE("No display with id: %" PRIu64, inputDisplayId);
+                        return NAME_NOT_FOUND;
+                    }
+
+                    inputId = std::make_optional<PhysicalDisplayId>(inputDisplayId);
+                }
+                {
+                    Mutex::Autolock lock(mStateLock);
+                    mLayerCachingEnabled = n != 0;
+                    for (const auto& [_, display] : mDisplays) {
+                        if (!inputId || *inputId == display->getPhysicalId()) {
+                            display->enableLayerCaching(mLayerCachingEnabled);
+                        }
+                    }
+                }
+                invalidateHwcGeometry();
+                repaintEverything();
                 return NO_ERROR;
             }
         }
