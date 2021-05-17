@@ -271,6 +271,10 @@ public:
 
     static constexpr SkipInitializationTag SkipInitialization;
 
+    // Whether or not SDR layers should be dimmed to the desired SDR white point instead of
+    // being treated as native display brightness
+    static bool enableSdrDimming;
+
     // must be called before clients can connect
     void init() ANDROID_API;
 
@@ -911,8 +915,8 @@ private:
                                  const sp<IScreenCaptureListener>&);
     status_t renderScreenImplLocked(const RenderArea&, TraverseLayersFunction,
                                     const std::shared_ptr<renderengine::ExternalTexture>&,
-                                    bool forSystem, bool regionSampling, bool grayscale,
-                                    ScreenCaptureResults&);
+                                    bool canCaptureBlackoutContent, bool regionSampling,
+                                    bool grayscale, ScreenCaptureResults&);
 
     sp<DisplayDevice> getDisplayByIdOrLayerStack(uint64_t displayOrLayerStack) REQUIRES(mStateLock);
     sp<DisplayDevice> getDisplayById(DisplayId displayId) const REQUIRES(mStateLock);
@@ -1429,6 +1433,9 @@ private:
             REQUIRES(mStateLock);
 
     std::atomic<ui::Transform::RotationFlags> mDefaultDisplayTransformHint;
+
+    void scheduleRegionSamplingThread();
+    void notifyRegionSamplingThread();
 };
 
 } // namespace android
