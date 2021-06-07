@@ -90,6 +90,7 @@ namespace android {
 class Client;
 class EventThread;
 class FpsReporter;
+class TunnelModeEnabledReporter;
 class HdrLayerInfoReporter;
 class HWComposer;
 struct SetInputWindowsListener;
@@ -169,11 +170,6 @@ struct SurfaceFlingerBE {
     };
     mutable Mutex mBufferingStatsMutex;
     std::unordered_map<std::string, BufferingStats> mBufferingStats;
-
-    // The composer sequence id is a monotonically increasing integer that we
-    // use to differentiate callbacks from different hardware composer
-    // instances. Each hardware composer instance gets a different sequence id.
-    int32_t mComposerSequenceId = 0;
 };
 
 class SurfaceFlinger : public BnSurfaceComposer,
@@ -227,10 +223,6 @@ public:
     // This instruct VirtualDisplaySurface to use HWC for such conversion on
     // GL composition.
     static bool useHwcForRgbToYuv;
-
-    // Maximum dimension supported by HWC for virtual display.
-    // Equal to min(max_height, max_width).
-    static uint64_t maxVirtualDisplaySize;
 
     // Controls the number of buffers SurfaceFlinger will allocate for use in
     // FramebufferSurface
@@ -359,6 +351,7 @@ private:
     friend class BufferStateLayer;
     friend class Client;
     friend class FpsReporter;
+    friend class TunnelModeEnabledReporter;
     friend class Layer;
     friend class MonitoredProducer;
     friend class RefreshRateOverlay;
@@ -673,6 +666,10 @@ private:
     status_t removeRegionSamplingListener(const sp<IRegionSamplingListener>& listener) override;
     status_t addFpsListener(int32_t taskId, const sp<gui::IFpsListener>& listener) override;
     status_t removeFpsListener(const sp<gui::IFpsListener>& listener) override;
+    status_t addTunnelModeEnabledListener(
+            const sp<gui::ITunnelModeEnabledListener>& listener) override;
+    status_t removeTunnelModeEnabledListener(
+            const sp<gui::ITunnelModeEnabledListener>& listener) override;
     status_t setDesiredDisplayModeSpecs(const sp<IBinder>& displayToken,
                                         ui::DisplayModeId displayModeId, bool allowGroupSwitching,
                                         float primaryRefreshRateMin, float primaryRefreshRateMax,
@@ -716,18 +713,14 @@ private:
     // Implements RefBase.
     void onFirstRef() override;
 
-    /*
-     * HWC2::ComposerCallback / HWComposer::EventHandler interface
-     */
-    void onVsyncReceived(int32_t sequenceId, hal::HWDisplayId hwcDisplayId, int64_t timestamp,
-                         std::optional<hal::VsyncPeriodNanos> vsyncPeriod) override;
-    void onHotplugReceived(int32_t sequenceId, hal::HWDisplayId hwcDisplayId,
-                           hal::Connection connection) override;
-    void onRefreshReceived(int32_t sequenceId, hal::HWDisplayId hwcDisplayId) override;
-    void onVsyncPeriodTimingChangedReceived(
-            int32_t sequenceId, hal::HWDisplayId display,
-            const hal::VsyncPeriodChangeTimeline& updatedTimeline) override;
-    void onSeamlessPossible(int32_t sequenceId, hal::HWDisplayId display) override;
+    // HWC2::ComposerCallback overrides:
+    void onComposerHalVsync(hal::HWDisplayId, int64_t timestamp,
+                            std::optional<hal::VsyncPeriodNanos>) override;
+    void onComposerHalHotplug(hal::HWDisplayId, hal::Connection) override;
+    void onComposerHalRefresh(hal::HWDisplayId) override;
+    void onComposerHalVsyncPeriodTimingChanged(hal::HWDisplayId,
+                                               const hal::VsyncPeriodChangeTimeline&) override;
+    void onComposerHalSeamlessPossible(hal::HWDisplayId) override;
 
     /*
      * ISchedulerCallback
@@ -918,10 +911,6 @@ private:
                                     bool canCaptureBlackoutContent, bool regionSampling,
                                     bool grayscale, ScreenCaptureResults&);
 
-    sp<DisplayDevice> getDisplayByIdOrLayerStack(uint64_t displayOrLayerStack) REQUIRES(mStateLock);
-    sp<DisplayDevice> getDisplayById(DisplayId displayId) const REQUIRES(mStateLock);
-    sp<DisplayDevice> getDisplayByLayerStack(uint64_t layerStack) REQUIRES(mStateLock);
-
     // If the uid provided is not UNSET_UID, the traverse will skip any layers that don't have a
     // matching ownerUid
     void traverseLayersInLayerStack(ui::LayerStack, const int32_t uid, const LayerVector::Visitor&);
@@ -947,6 +936,14 @@ private:
         return it == mDisplays.end() ? nullptr : it->second;
     }
 
+    sp<const DisplayDevice> getDisplayDeviceLocked(PhysicalDisplayId id) const
+            REQUIRES(mStateLock) {
+        if (const auto token = getPhysicalDisplayTokenLocked(id)) {
+            return getDisplayDeviceLocked(token);
+        }
+        return nullptr;
+    }
+
     sp<const DisplayDevice> getDefaultDisplayDeviceLocked() const REQUIRES(mStateLock) {
         return const_cast<SurfaceFlinger*>(this)->getDefaultDisplayDeviceLocked();
     }
@@ -961,6 +958,20 @@ private:
     sp<const DisplayDevice> getDefaultDisplayDevice() EXCLUDES(mStateLock) {
         Mutex::Autolock lock(mStateLock);
         return getDefaultDisplayDeviceLocked();
+    }
+
+    // Returns the first display that matches a `bool(const DisplayDevice&)` predicate.
+    template <typename Predicate>
+    sp<DisplayDevice> findDisplay(Predicate p) const REQUIRES(mStateLock) {
+        const auto it = std::find_if(mDisplays.begin(), mDisplays.end(),
+                                     [&](const auto& pair) { return p(*pair.second); });
+
+        return it == mDisplays.end() ? nullptr : it->second;
+    }
+
+    sp<const DisplayDevice> getDisplayDeviceLocked(DisplayId id) const REQUIRES(mStateLock) {
+        // TODO(b/182939859): Replace tokens with IDs for display lookup.
+        return findDisplay([id](const auto& display) { return display.getId() == id; });
     }
 
     // mark a region of a layer stack dirty. this updates the dirty
@@ -1079,6 +1090,14 @@ private:
         const auto hwcDisplayId = getHwComposer().getInternalHwcDisplayId();
         return hwcDisplayId ? getHwComposer().toPhysicalDisplayId(*hwcDisplayId) : std::nullopt;
     }
+
+    // Toggles use of HAL/GPU virtual displays.
+    void enableHalVirtualDisplays(bool);
+
+    // Virtual display lifecycle for ID generation and HAL allocation.
+    VirtualDisplayId acquireVirtualDisplay(ui::Size, ui::PixelFormat, ui::LayerStack)
+            REQUIRES(mStateLock);
+    void releaseVirtualDisplay(VirtualDisplayId);
 
     /*
      * Debugging & dumpsys
@@ -1232,7 +1251,10 @@ private:
     std::unordered_map<PhysicalDisplayId, sp<IBinder>> mPhysicalDisplayTokens
             GUARDED_BY(mStateLock);
 
-    RandomDisplayIdGenerator<GpuVirtualDisplayId> mGpuVirtualDisplayIdGenerator;
+    struct {
+        DisplayIdGenerator<GpuVirtualDisplayId> gpu;
+        std::optional<DisplayIdGenerator<HalVirtualDisplayId>> hal;
+    } mVirtualDisplayIdGenerators;
 
     std::unordered_map<BBinder*, wp<Layer>> mLayersByLocalBinderToken GUARDED_BY(mStateLock);
 
@@ -1255,11 +1277,9 @@ private:
     const std::shared_ptr<TimeStats> mTimeStats;
     const std::unique_ptr<FrameTracer> mFrameTracer;
     const std::unique_ptr<frametimeline::FrameTimeline> mFrameTimeline;
-    bool mUseHwcVirtualDisplays = false;
+
     // If blurs should be enabled on this device.
     bool mSupportsBlur = false;
-    // Disable blurs, for debugging
-    std::atomic<bool> mDisableBlurs = false;
     // If blurs are considered expensive and should require high GPU frequency.
     bool mBlursAreExpensive = false;
     std::atomic<uint32_t> mFrameMissedCount = 0;
@@ -1368,6 +1388,7 @@ private:
     bool mLumaSampling = true;
     sp<RegionSamplingThread> mRegionSamplingThread;
     sp<FpsReporter> mFpsReporter;
+    sp<TunnelModeEnabledReporter> mTunnelModeEnabledReporter;
     ui::DisplayPrimaries mInternalDisplayPrimaries;
 
     const float mInternalDisplayDensity;
