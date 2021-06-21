@@ -79,6 +79,12 @@ struct CompositionRefreshArgs {
 
     // If set, causes the dirty regions to flash with the delay
     std::optional<std::chrono::microseconds> devOptFlashDirtyRegionsDelay;
+
+    // The earliest time to send the present command to the HAL
+    std::chrono::steady_clock::time_point earliestPresentTime;
+
+    // The predicted next invalidation time
+    std::optional<std::chrono::steady_clock::time_point> nextInvalidateTime;
 };
 
 } // namespace android::compositionengine
