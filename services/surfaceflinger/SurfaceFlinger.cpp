@@ -2066,7 +2066,9 @@ void SurfaceFlinger::onMessageRefresh() {
                 std::chrono::milliseconds(mDebugRegion > 1 ? mDebugRegion : 0);
     }
 
-    refreshArgs.earliestPresentTime = mScheduler->getPreviousVsyncFrom(mExpectedPresentTime);
+    const auto prevVsyncTime = mScheduler->getPreviousVsyncFrom(mExpectedPresentTime);
+    const auto hwcMinWorkDuration = mVsyncConfiguration->getCurrentConfigs().hwcMinWorkDuration;
+    refreshArgs.earliestPresentTime = prevVsyncTime - hwcMinWorkDuration;
     refreshArgs.nextInvalidateTime = mEventQueue->nextExpectedInvalidate();
 
     mGeometryInvalid = false;
@@ -2229,18 +2231,15 @@ void SurfaceFlinger::postComposition() {
 
     getBE().mDisplayTimeline.push(mPreviousPresentFences[0].fenceTime);
 
+    nsecs_t now = systemTime();
+
     // Set presentation information before calling Layer::releasePendingBuffer, such that jank
     // information from previous' frame classification is already available when sending jank info
     // to clients, so they get jank classification as early as possible.
-    mFrameTimeline->setSfPresent(systemTime(), mPreviousPresentFences[0].fenceTime,
+    mFrameTimeline->setSfPresent(/* sfPresentTime */ now, mPreviousPresentFences[0].fenceTime,
                                  glCompositionDoneFenceTime);
 
-    nsecs_t dequeueReadyTime = systemTime();
-    for (const auto& layer : mLayersWithQueuedFrames) {
-        layer->releasePendingBuffer(dequeueReadyTime);
-    }
-
-    const DisplayStatInfo stats = mScheduler->getDisplayStatInfo(systemTime());
+    const DisplayStatInfo stats = mScheduler->getDisplayStatInfo(now);
 
     // We use the CompositionEngine::getLastFrameRefreshTimestamp() which might
     // be sampled a little later than when we started doing work for this frame,
@@ -2253,14 +2252,15 @@ void SurfaceFlinger::postComposition() {
         compositorTiming = getBE().mCompositorTiming;
     }
 
-    mDrawingState.traverse([&](Layer* layer) {
+    for (const auto& layer: mLayersWithQueuedFrames) {
         const bool frameLatched =
                 layer->onPostComposition(display, glCompositionDoneFenceTime,
                                          mPreviousPresentFences[0].fenceTime, compositorTiming);
+        layer->releasePendingBuffer(/*dequeueReadyTime*/ now);
         if (frameLatched) {
             recordBufferingStats(layer->getName(), layer->getOccupancyHistory(false));
         }
-    });
+    }
 
     std::vector<std::pair<std::shared_ptr<compositionengine::Display>, sp<HdrLayerInfoReporter>>>
             hdrInfoListeners;
@@ -2857,7 +2857,9 @@ void SurfaceFlinger::processDisplayChanged(const wp<IBinder>& displayToken,
             (currentState.orientedDisplaySpaceRect != drawingState.orientedDisplaySpaceRect)) {
             display->setProjection(currentState.orientation, currentState.layerStackSpaceRect,
                                    currentState.orientedDisplaySpaceRect);
-            mDefaultDisplayTransformHint = display->getTransformHint();
+            if (display->isPrimary()) {
+                mDefaultDisplayTransformHint = display->getTransformHint();
+            }
         }
         if (currentState.width != drawingState.width ||
             currentState.height != drawingState.height) {
@@ -2938,6 +2940,11 @@ void SurfaceFlinger::handleTransactionLocked(uint32_t transactionFlags) {
                 mInputInfoChanged = true;
             }
         });
+    }
+
+    if (mSomeChildrenChanged) {
+        mVisibleRegionsDirty = true;
+        mSomeChildrenChanged = false;
     }
 
     // Update transform hint
@@ -3198,6 +3205,7 @@ void SurfaceFlinger::setVsyncConfig(const VsyncModulator::VsyncConfig& config,
 }
 
 void SurfaceFlinger::commitTransaction() {
+    ATRACE_CALL();
     commitTransactionLocked();
     signalSynchronousTransactions(CountDownLatch::eSyncTransaction);
     mAnimTransactionPending = false;
@@ -4465,10 +4473,11 @@ void SurfaceFlinger::onInitializeDisplays() {
     d.height = 0;
     displays.add(d);
 
+    nsecs_t now = systemTime();
     // It should be on the main thread, apply it directly.
     applyTransactionState(FrameTimelineInfo{}, state, displays, 0, mInputWindowCommands,
-                          systemTime(), true, {}, systemTime(), true, false, {}, getpid(), getuid(),
-                          0 /* Undefined transactionId */);
+                          /* desiredPresentTime */ now, true, {}, /* postTime */ now, true, false,
+                          {}, getpid(), getuid(), 0 /* Undefined transactionId */);
 
     setPowerModeInternal(display, hal::PowerMode::ON);
     const nsecs_t vsyncPeriod = mRefreshRateConfigs->getCurrentRefreshRate().getVsyncPeriod();
@@ -5247,7 +5256,7 @@ status_t SurfaceFlinger::CheckTransactCodeCredentials(uint32_t code) {
         case CAPTURE_DISPLAY:
         case SET_FRAME_TIMELINE_INFO:
         case GET_GPU_CONTEXT_PRIORITY:
-        case GET_EXTRA_BUFFER_COUNT: {
+        case GET_MAX_ACQUIRED_BUFFER_COUNT: {
             // This is not sensitive information, so should not require permission control.
             return OK;
         }
@@ -5808,8 +5817,6 @@ void SurfaceFlinger::toggleKernelIdleTimer() {
                 mKernelIdleTimerEnabled = true;
             }
             break;
-        case KernelIdleTimerAction::NoChange:
-            break;
     }
 }
 
@@ -6048,12 +6055,12 @@ status_t SurfaceFlinger::captureLayers(const LayerCaptureArgs& args,
         }
 
         if (!canCaptureBlackoutContent &&
-            parent->getCurrentState().flags & layer_state_t::eLayerSecure) {
+            parent->getDrawingState().flags & layer_state_t::eLayerSecure) {
             ALOGW("Attempting to capture secure layer: PERMISSION_DENIED");
             return PERMISSION_DENIED;
         }
 
-        Rect parentSourceBounds = parent->getCroppedBufferSize(parent->getCurrentState());
+        Rect parentSourceBounds = parent->getCroppedBufferSize(parent->getDrawingState());
         if (args.sourceCrop.width() <= 0) {
             crop.left = 0;
             crop.right = parentSourceBounds.getWidth();
@@ -6292,7 +6299,7 @@ status_t SurfaceFlinger::renderScreenImplLocked(
     Region clearRegion = Region::INVALID_REGION;
     bool disableBlurs = false;
     traverseLayers([&](Layer* layer) {
-        disableBlurs |= layer->getCurrentState().sidebandStream != nullptr;
+        disableBlurs |= layer->getDrawingState().sidebandStream != nullptr;
 
         Region clip(renderArea.getBounds());
         compositionengine::LayerFE::ClientCompositionTargetSettings targetSettings{
@@ -6800,23 +6807,36 @@ int SurfaceFlinger::getGPUContextPriority() {
     return getRenderEngine().getContextPriority();
 }
 
-int SurfaceFlinger::calculateExtraBufferCount(Fps maxSupportedRefreshRate,
-                                              std::chrono::nanoseconds presentLatency) {
-    auto pipelineDepth = presentLatency.count() / maxSupportedRefreshRate.getPeriodNsecs();
-    if (presentLatency.count() % maxSupportedRefreshRate.getPeriodNsecs()) {
+int SurfaceFlinger::calculateMaxAcquiredBufferCount(Fps refreshRate,
+                                                    std::chrono::nanoseconds presentLatency) {
+    auto pipelineDepth = presentLatency.count() / refreshRate.getPeriodNsecs();
+    if (presentLatency.count() % refreshRate.getPeriodNsecs()) {
         pipelineDepth++;
     }
-    return std::max(0ll, pipelineDepth - 2);
+    return std::max(1ll, pipelineDepth - 1);
 }
 
-status_t SurfaceFlinger::getExtraBufferCount(int* extraBuffers) const {
+status_t SurfaceFlinger::getMaxAcquiredBufferCount(int* buffers) const {
     const auto maxSupportedRefreshRate = mRefreshRateConfigs->getSupportedRefreshRateRange().max;
-    const auto vsyncConfig =
-            mVsyncConfiguration->getConfigsForRefreshRate(maxSupportedRefreshRate).late;
-    const auto presentLatency = vsyncConfig.appWorkDuration + vsyncConfig.sfWorkDuration;
-
-    *extraBuffers = calculateExtraBufferCount(maxSupportedRefreshRate, presentLatency);
+    *buffers = getMaxAcquiredBufferCountForRefreshRate(maxSupportedRefreshRate);
     return NO_ERROR;
+}
+
+int SurfaceFlinger::getMaxAcquiredBufferCountForCurrentRefreshRate(uid_t uid) const {
+    const auto refreshRate = [&] {
+        const auto frameRateOverride = mScheduler->getFrameRateOverride(uid);
+        if (frameRateOverride.has_value()) {
+            return frameRateOverride.value();
+        }
+        return mRefreshRateConfigs->getCurrentRefreshRate().getFps();
+    }();
+    return getMaxAcquiredBufferCountForRefreshRate(refreshRate);
+}
+
+int SurfaceFlinger::getMaxAcquiredBufferCountForRefreshRate(Fps refreshRate) const {
+    const auto vsyncConfig = mVsyncConfiguration->getConfigsForRefreshRate(refreshRate).late;
+    const auto presentLatency = vsyncConfig.appWorkDuration + vsyncConfig.sfWorkDuration;
+    return calculateMaxAcquiredBufferCount(refreshRate, presentLatency);
 }
 
 void SurfaceFlinger::TransactionState::traverseStatesWithBuffers(
@@ -6893,6 +6913,8 @@ sp<Layer> SurfaceFlinger::handleLayerCreatedLocked(const sp<IBinder>& handle, bo
     } else {
         parent->addChild(layer);
     }
+
+    layer->updateTransformHint(mDefaultDisplayTransformHint);
 
     if (state->initialProducer != nullptr) {
         mGraphicBufferProducerList.insert(state->initialProducer);

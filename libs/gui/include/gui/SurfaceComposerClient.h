@@ -83,7 +83,7 @@ using TransactionCompletedCallback =
                            const std::vector<SurfaceControlStats>& /*stats*/)>;
 using ReleaseBufferCallback =
         std::function<void(uint64_t /* graphicsBufferId */, const sp<Fence>& /*releaseFence*/,
-                           uint32_t transformHint)>;
+                           uint32_t transformHint, uint32_t currentMaxAcquiredBufferCount)>;
 
 using SurfaceStatsCallback =
         std::function<void(void* /*context*/, nsecs_t /*latchTime*/,
@@ -655,6 +655,9 @@ class TransactionCompletedListener : public BnTransactionCompletedListener {
     // This lock needs to be recursive so we can unregister a callback from within that callback.
     std::recursive_mutex mJankListenerMutex;
 
+    // This lock needs to be recursive so we can unregister a callback from within that callback.
+    std::recursive_mutex mSurfaceStatsListenerMutex;
+
     bool mListening GUARDED_BY(mMutex) = false;
 
     int64_t mCallbackIdCounter GUARDED_BY(mMutex) = 1;
@@ -683,8 +686,10 @@ class TransactionCompletedListener : public BnTransactionCompletedListener {
     std::multimap<sp<IBinder>, sp<JankDataListener>> mJankListeners;
     std::unordered_map<uint64_t /* graphicsBufferId */, ReleaseBufferCallback>
             mReleaseBufferCallbacks GUARDED_BY(mMutex);
-    std::multimap<sp<IBinder>, SurfaceStatsCallbackEntry>
-                mSurfaceStatsListeners GUARDED_BY(mMutex);
+
+    // This is protected by mSurfaceStatsListenerMutex, but GUARDED_BY isn't supported for
+    // std::recursive_mutex
+    std::multimap<sp<IBinder>, SurfaceStatsCallbackEntry> mSurfaceStatsListeners;
 
 public:
     static sp<TransactionCompletedListener> getInstance();
@@ -724,7 +729,7 @@ public:
     // BnTransactionCompletedListener overrides
     void onTransactionCompleted(ListenerStats stats) override;
     void onReleaseBuffer(uint64_t /* graphicsBufferId */, sp<Fence> releaseFence,
-                         uint32_t transformHint) override;
+                         uint32_t transformHint, uint32_t currentMaxAcquiredBufferCount) override;
 
 private:
     ReleaseBufferCallback popReleaseBufferCallbackLocked(uint64_t /* graphicsBufferId */);
