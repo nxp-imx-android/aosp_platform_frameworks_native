@@ -166,7 +166,7 @@ binder::Status checkUid(uid_t expectedUid) {
     }
 }
 
-binder::Status checkArgumentUuid(const std::unique_ptr<std::string>& uuid) {
+binder::Status checkArgumentUuid(const std::optional<std::string>& uuid) {
     if (!uuid || is_valid_filename(*uuid)) {
         return ok();
     } else {
@@ -175,7 +175,7 @@ binder::Status checkArgumentUuid(const std::unique_ptr<std::string>& uuid) {
     }
 }
 
-binder::Status checkArgumentUuidTestOrNull(const std::unique_ptr<std::string>& uuid) {
+binder::Status checkArgumentUuidTestOrNull(const std::optional<std::string>& uuid) {
     if (!uuid || strcmp(uuid->c_str(), kTestUuid) == 0) {
         return ok();
     } else {
@@ -214,7 +214,7 @@ binder::Status checkArgumentPath(const std::string& path) {
     return ok();
 }
 
-binder::Status checkArgumentPath(const std::unique_ptr<std::string>& path) {
+binder::Status checkArgumentPath(const std::optional<std::string>& path) {
     if (path) {
         return checkArgumentPath(*path);
     } else {
@@ -342,7 +342,8 @@ static int restorecon_app_data_lazy(const std::string& path, const std::string& 
 
     // If the initial top-level restorecon above changed the label, then go
     // back and restorecon everything recursively
-    if (strcmp(before, after)) {
+    // TODO(b/190567190, b/188141923) Remove recursive fixup of com.google.android.gsf.
+    if (strcmp(before, after) || (path.find("com.google.android.gsf") != std::string::npos)) {
         if (existing) {
             LOG(DEBUG) << "Detected label change from " << before << " to " << after << " at "
                     << path << "; running recursive restorecon";
@@ -398,6 +399,10 @@ static bool prepare_app_profile_dir(const std::string& packageName, int32_t appI
         PLOG(ERROR) << "Failed to prepare " << profile_dir;
         return false;
     }
+    if (selinux_android_restorecon(profile_dir.c_str(), 0)) {
+        PLOG(ERROR) << "Failed to restorecon " << profile_dir;
+        return false;
+    }
 
     const std::string ref_profile_path =
             create_primary_reference_profile_package_dir_path(packageName);
@@ -420,33 +425,7 @@ static bool prepare_app_profile_dir(const std::string& packageName, int32_t appI
     return true;
 }
 
-binder::Status InstalldNativeService::createAppDataBatched(
-        const std::unique_ptr<std::vector<std::unique_ptr<std::string>>>& uuids,
-        const std::unique_ptr<std::vector<std::unique_ptr<std::string>>>& packageNames,
-        int32_t userId, int32_t flags, const std::vector<int32_t>& appIds,
-        const std::vector<std::string>& seInfos, const std::vector<int32_t>& targetSdkVersions,
-        int64_t* _aidl_return) {
-    ENFORCE_UID(AID_SYSTEM);
-    std::lock_guard<std::recursive_mutex> lock(mLock);
-
-    ATRACE_BEGIN("createAppDataBatched");
-    binder::Status ret;
-    for (size_t i = 0; i < uuids->size(); i++) {
-        if (!packageNames->at(i)) {
-            continue;
-        }
-        ret = createAppData(uuids->at(i), *packageNames->at(i), userId, flags, appIds[i],
-                seInfos[i], targetSdkVersions[i], _aidl_return);
-        if (!ret.isOk()) {
-            ATRACE_END();
-            return ret;
-        }
-    }
-    ATRACE_END();
-    return ok();
-}
-
-binder::Status InstalldNativeService::createAppData(const std::unique_ptr<std::string>& uuid,
+binder::Status InstalldNativeService::createAppData(const std::optional<std::string>& uuid,
         const std::string& packageName, int32_t userId, int32_t flags, int32_t appId,
         const std::string& seInfo, int32_t targetSdkVersion, int64_t* _aidl_return) {
     ENFORCE_UID(AID_SYSTEM);
@@ -527,7 +506,39 @@ binder::Status InstalldNativeService::createAppData(const std::unique_ptr<std::s
     return ok();
 }
 
-binder::Status InstalldNativeService::migrateAppData(const std::unique_ptr<std::string>& uuid,
+
+binder::Status InstalldNativeService::createAppData(
+        const android::os::CreateAppDataArgs& args,
+        android::os::CreateAppDataResult* _aidl_return) {
+    ENFORCE_UID(AID_SYSTEM);
+    std::lock_guard<std::recursive_mutex> lock(mLock);
+
+    int64_t ceDataInode = -1;
+    auto status = createAppData(args.uuid, args.packageName, args.userId, args.flags, args.appId,
+                                args.seInfo, args.targetSdkVersion, &ceDataInode);
+    _aidl_return->ceDataInode = ceDataInode;
+    _aidl_return->exceptionCode = status.exceptionCode();
+    _aidl_return->exceptionMessage = status.exceptionMessage();
+    return ok();
+}
+
+binder::Status InstalldNativeService::createAppDataBatched(
+        const std::vector<android::os::CreateAppDataArgs>& args,
+        std::vector<android::os::CreateAppDataResult>* _aidl_return) {
+    ENFORCE_UID(AID_SYSTEM);
+    std::lock_guard<std::recursive_mutex> lock(mLock);
+
+    std::vector<android::os::CreateAppDataResult> results;
+    for (auto arg : args) {
+        android::os::CreateAppDataResult result;
+        createAppData(arg, &result);
+        results.push_back(result);
+    }
+    *_aidl_return = results;
+    return ok();
+}
+
+binder::Status InstalldNativeService::migrateAppData(const std::optional<std::string>& uuid,
         const std::string& packageName, int32_t userId, int32_t flags) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_UUID(uuid);
@@ -588,7 +599,7 @@ binder::Status InstalldNativeService::clearAppProfiles(const std::string& packag
     return res;
 }
 
-binder::Status InstalldNativeService::clearAppData(const std::unique_ptr<std::string>& uuid,
+binder::Status InstalldNativeService::clearAppData(const std::optional<std::string>& uuid,
         const std::string& packageName, int32_t userId, int32_t flags, int64_t ceDataInode) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_UUID(uuid);
@@ -708,7 +719,7 @@ binder::Status InstalldNativeService::destroyAppProfiles(const std::string& pack
     return res;
 }
 
-binder::Status InstalldNativeService::destroyAppData(const std::unique_ptr<std::string>& uuid,
+binder::Status InstalldNativeService::destroyAppData(const std::optional<std::string>& uuid,
         const std::string& packageName, int32_t userId, int32_t flags, int64_t ceDataInode) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_UUID(uuid);
@@ -780,7 +791,7 @@ static gid_t get_cache_gid(uid_t uid) {
     return (gid != -1) ? gid : uid;
 }
 
-binder::Status InstalldNativeService::fixupAppData(const std::unique_ptr<std::string>& uuid,
+binder::Status InstalldNativeService::fixupAppData(const std::optional<std::string>& uuid,
         int32_t flags) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_UUID(uuid);
@@ -900,7 +911,7 @@ static int32_t copy_directory_recursive(const char* from, const char* to) {
 }
 
 binder::Status InstalldNativeService::snapshotAppData(
-        const std::unique_ptr<std::string>& volumeUuid,
+        const std::optional<std::string>& volumeUuid,
         const std::string& packageName, int32_t user, int32_t snapshotId,
         int32_t storageFlags, int64_t* _aidl_return) {
     ENFORCE_UID(AID_SYSTEM);
@@ -1030,7 +1041,7 @@ binder::Status InstalldNativeService::snapshotAppData(
 }
 
 binder::Status InstalldNativeService::restoreAppDataSnapshot(
-        const std::unique_ptr<std::string>& volumeUuid, const std::string& packageName,
+        const std::optional<std::string>& volumeUuid, const std::string& packageName,
         const int32_t appId, const std::string& seInfo, const int32_t user,
         const int32_t snapshotId, int32_t storageFlags) {
     ENFORCE_UID(AID_SYSTEM);
@@ -1102,7 +1113,7 @@ binder::Status InstalldNativeService::restoreAppDataSnapshot(
 }
 
 binder::Status InstalldNativeService::destroyAppDataSnapshot(
-        const std::unique_ptr<std::string> &volumeUuid, const std::string& packageName,
+        const std::optional<std::string> &volumeUuid, const std::string& packageName,
         const int32_t user, const int64_t ceSnapshotInode, const int32_t snapshotId,
         int32_t storageFlags) {
     ENFORCE_UID(AID_SYSTEM);
@@ -1135,7 +1146,7 @@ binder::Status InstalldNativeService::destroyAppDataSnapshot(
 }
 
 binder::Status InstalldNativeService::destroyCeSnapshotsNotSpecified(
-        const std::unique_ptr<std::string> &volumeUuid, const int32_t userId,
+        const std::optional<std::string> &volumeUuid, const int32_t user,
         const std::vector<int32_t>& retainSnapshotIds) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_UUID_IS_TEST_OR_NULL(volumeUuid);
@@ -1143,7 +1154,7 @@ binder::Status InstalldNativeService::destroyCeSnapshotsNotSpecified(
 
     const char* volume_uuid = volumeUuid ? volumeUuid->c_str() : nullptr;
 
-    auto base_path = create_data_misc_ce_rollback_base_path(volume_uuid, userId);
+    auto base_path = create_data_misc_ce_rollback_base_path(volume_uuid, user);
 
     std::unique_ptr<DIR, decltype(&closedir)> dir(opendir(base_path.c_str()), closedir);
     if (!dir) {
@@ -1162,7 +1173,7 @@ binder::Status InstalldNativeService::destroyCeSnapshotsNotSpecified(
                 std::find(retainSnapshotIds.begin(), retainSnapshotIds.end(),
                           snapshot_id) == retainSnapshotIds.end()) {
             auto rollback_path = create_data_misc_ce_rollback_path(
-                volume_uuid, userId, snapshot_id);
+                volume_uuid, user, snapshot_id);
             int res = delete_dir_contents_and_dir(rollback_path, true /* ignore_if_missing */);
             if (res != 0) {
                 return error(res, "Failed clearing snapshot " + rollback_path);
@@ -1172,8 +1183,8 @@ binder::Status InstalldNativeService::destroyCeSnapshotsNotSpecified(
     return ok();
 }
 
-binder::Status InstalldNativeService::moveCompleteApp(const std::unique_ptr<std::string>& fromUuid,
-        const std::unique_ptr<std::string>& toUuid, const std::string& packageName,
+binder::Status InstalldNativeService::moveCompleteApp(const std::optional<std::string>& fromUuid,
+        const std::optional<std::string>& toUuid, const std::string& packageName,
         int32_t appId, const std::string& seInfo,
         int32_t targetSdkVersion, const std::string& fromCodePath) {
     ENFORCE_UID(AID_SYSTEM);
@@ -1280,7 +1291,7 @@ fail:
     return res;
 }
 
-binder::Status InstalldNativeService::createUserData(const std::unique_ptr<std::string>& uuid,
+binder::Status InstalldNativeService::createUserData(const std::optional<std::string>& uuid,
         int32_t userId, int32_t userSerial ATTRIBUTE_UNUSED, int32_t flags) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_UUID(uuid);
@@ -1298,7 +1309,7 @@ binder::Status InstalldNativeService::createUserData(const std::unique_ptr<std::
     return ok();
 }
 
-binder::Status InstalldNativeService::destroyUserData(const std::unique_ptr<std::string>& uuid,
+binder::Status InstalldNativeService::destroyUserData(const std::optional<std::string>& uuid,
         int32_t userId, int32_t flags) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_UUID(uuid);
@@ -1335,13 +1346,13 @@ binder::Status InstalldNativeService::destroyUserData(const std::unique_ptr<std:
     return res;
 }
 
-binder::Status InstalldNativeService::freeCache(const std::unique_ptr<std::string>& uuid,
+binder::Status InstalldNativeService::freeCache(const std::optional<std::string>& uuid,
         int64_t targetFreeBytes, int64_t cacheReservedBytes, int32_t flags) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_UUID(uuid);
     std::lock_guard<std::recursive_mutex> lock(mLock);
 
-    auto uuidString = uuid ? *uuid : "";
+    auto uuidString = uuid.value_or("");
     const char* uuid_ = uuid ? uuid->c_str() : nullptr;
     auto data_path = create_data_path(uuid_);
     auto noop = (flags & FLAG_FREE_CACHE_NOOP);
@@ -1739,7 +1750,7 @@ static void collectManualExternalStatsForUser(const std::string& path, struct st
     fts_close(fts);
 }
 
-binder::Status InstalldNativeService::getAppSize(const std::unique_ptr<std::string>& uuid,
+binder::Status InstalldNativeService::getAppSize(const std::optional<std::string>& uuid,
         const std::vector<std::string>& packageNames, int32_t userId, int32_t flags,
         int32_t appId, const std::vector<int64_t>& ceDataInodes,
         const std::vector<std::string>& codePaths, std::vector<int64_t>* _aidl_return) {
@@ -1779,7 +1790,7 @@ binder::Status InstalldNativeService::getAppSize(const std::unique_ptr<std::stri
     memset(&stats, 0, sizeof(stats));
     memset(&extStats, 0, sizeof(extStats));
 
-    auto uuidString = uuid ? *uuid : "";
+    auto uuidString = uuid.value_or("");
     const char* uuid_ = uuid ? uuid->c_str() : nullptr;
 
     if (!IsQuotaSupported(uuidString)) {
@@ -1966,7 +1977,7 @@ static external_sizes getExternalSizesForUserWithQuota(const std::string& uuid, 
     return sizes;
 }
 
-binder::Status InstalldNativeService::getUserSize(const std::unique_ptr<std::string>& uuid,
+binder::Status InstalldNativeService::getUserSize(const std::optional<std::string>& uuid,
         int32_t userId, int32_t flags, const std::vector<int32_t>& appIds,
         std::vector<int64_t>* _aidl_return) {
     ENFORCE_UID(AID_SYSTEM);
@@ -1986,7 +1997,7 @@ binder::Status InstalldNativeService::getUserSize(const std::unique_ptr<std::str
     memset(&stats, 0, sizeof(stats));
     memset(&extStats, 0, sizeof(extStats));
 
-    auto uuidString = uuid ? *uuid : "";
+    auto uuidString = uuid.value_or("");
     const char* uuid_ = uuid ? uuid->c_str() : nullptr;
 
     if (!IsQuotaSupported(uuidString)) {
@@ -2098,7 +2109,7 @@ binder::Status InstalldNativeService::getUserSize(const std::unique_ptr<std::str
     return ok();
 }
 
-binder::Status InstalldNativeService::getExternalSize(const std::unique_ptr<std::string>& uuid,
+binder::Status InstalldNativeService::getExternalSize(const std::optional<std::string>& uuid,
         int32_t userId, int32_t flags, const std::vector<int32_t>& appIds,
         std::vector<int64_t>* _aidl_return) {
     ENFORCE_UID(AID_SYSTEM);
@@ -2113,7 +2124,7 @@ binder::Status InstalldNativeService::getExternalSize(const std::unique_ptr<std:
     LOG(INFO) << "Measuring external " << userId;
 #endif
 
-    auto uuidString = uuid ? *uuid : "";
+    auto uuidString = uuid.value_or("");
     const char* uuid_ = uuid ? uuid->c_str() : nullptr;
 
     int64_t totalSize = 0;
@@ -2215,9 +2226,9 @@ binder::Status InstalldNativeService::getExternalSize(const std::unique_ptr<std:
 }
 
 binder::Status InstalldNativeService::getAppCrates(
-        const std::unique_ptr<std::string>& uuid,
+        const std::optional<std::string>& uuid,
         const std::vector<std::string>& packageNames, int32_t userId,
-        std::unique_ptr<std::vector<std::unique_ptr<CrateMetadata>>>* _aidl_return) {
+        std::optional<std::vector<std::optional<CrateMetadata>>>* _aidl_return) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_UUID(uuid);
     for (const auto& packageName : packageNames) {
@@ -2226,15 +2237,15 @@ binder::Status InstalldNativeService::getAppCrates(
 #ifdef ENABLE_STORAGE_CRATES
     std::lock_guard<std::recursive_mutex> lock(mLock);
 
-    auto retVector = std::make_unique<std::vector<std::unique_ptr<CrateMetadata>>>();
+    auto retVector = std::vector<std::optional<CrateMetadata>>();
     const char* uuid_ = uuid ? uuid->c_str() : nullptr;
 
-    std::function<void(CratedFolder, std::unique_ptr<CrateMetadata> &)> onCreateCrate =
-            [&](CratedFolder cratedFolder, std::unique_ptr<CrateMetadata> &crateMetadata) -> void {
+    std::function<void(CratedFolder, CrateMetadata&&)> onCreateCrate =
+            [&](CratedFolder cratedFolder, CrateMetadata&& crateMetadata) -> void {
         if (cratedFolder == nullptr) {
             return;
         }
-        retVector->push_back(std::move(crateMetadata));
+        retVector.push_back(std::move(crateMetadata));
     };
 
     for (const auto& packageName : packageNames) {
@@ -2246,15 +2257,15 @@ binder::Status InstalldNativeService::getAppCrates(
     }
 
 #if CRATE_DEBUG
-    LOG(WARNING) << "retVector->size() =" << retVector->size();
-    for (auto iter = retVector->begin(); iter != retVector->end(); ++iter) {
-        CrateManager::dump(*iter);
+    LOG(WARNING) << "retVector.size() =" << retVector.size();
+    for (auto& item : retVector) {
+        CrateManager::dump(*item);
     }
 #endif
 
     *_aidl_return = std::move(retVector);
 #else // ENABLE_STORAGE_CRATES
-    *_aidl_return = nullptr;
+    _aidl_return->reset();
 
     /* prevent compile warning fail */
     if (userId < 0) {
@@ -2265,22 +2276,22 @@ binder::Status InstalldNativeService::getAppCrates(
 }
 
 binder::Status InstalldNativeService::getUserCrates(
-        const std::unique_ptr<std::string>& uuid, int32_t userId,
-        std::unique_ptr<std::vector<std::unique_ptr<CrateMetadata>>>* _aidl_return) {
+        const std::optional<std::string>& uuid, int32_t userId,
+        std::optional<std::vector<std::optional<CrateMetadata>>>* _aidl_return) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_UUID(uuid);
 #ifdef ENABLE_STORAGE_CRATES
     std::lock_guard<std::recursive_mutex> lock(mLock);
 
     const char* uuid_ = uuid ? uuid->c_str() : nullptr;
-    auto retVector = std::make_unique<std::vector<std::unique_ptr<CrateMetadata>>>();
+    auto retVector = std::vector<std::optional<CrateMetadata>>();
 
-    std::function<void(CratedFolder, std::unique_ptr<CrateMetadata> &)> onCreateCrate =
-            [&](CratedFolder cratedFolder, std::unique_ptr<CrateMetadata> &crateMetadata) -> void {
+    std::function<void(CratedFolder, CrateMetadata&&)> onCreateCrate =
+            [&](CratedFolder cratedFolder, CrateMetadata&& crateMetadata) -> void {
         if (cratedFolder == nullptr) {
             return;
         }
-        retVector->push_back(std::move(crateMetadata));
+        retVector.push_back(std::move(crateMetadata));
     };
 
     std::function<void(FTSENT*)> onHandingPackage = [&](FTSENT* packageDir) -> void {
@@ -2290,15 +2301,15 @@ binder::Status InstalldNativeService::getUserCrates(
     CrateManager::traverseAllPackagesForUser(uuid, userId, onHandingPackage);
 
 #if CRATE_DEBUG
-    LOG(DEBUG) << "retVector->size() =" << retVector->size();
-    for (auto iter = retVector->begin(); iter != retVector->end(); ++iter) {
-        CrateManager::dump(*iter);
+    LOG(DEBUG) << "retVector.size() =" << retVector.size();
+    for (auto& item : retVector) {
+        CrateManager::dump(*item);
     }
 #endif
 
     *_aidl_return = std::move(retVector);
 #else // ENABLE_STORAGE_CRATES
-    *_aidl_return = nullptr;
+    _aidl_return->reset();
 
     /* prevent compile warning fail */
     if (userId < 0) {
@@ -2308,7 +2319,7 @@ binder::Status InstalldNativeService::getUserCrates(
     return ok();
 }
 
-binder::Status InstalldNativeService::setAppQuota(const std::unique_ptr<std::string>& uuid,
+binder::Status InstalldNativeService::setAppQuota(const std::optional<std::string>& uuid,
         int32_t userId, int32_t appId, int64_t cacheQuota) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_UUID(uuid);
@@ -2346,7 +2357,7 @@ binder::Status InstalldNativeService::copySystemProfile(const std::string& syste
 
 // TODO: Consider returning error codes.
 binder::Status InstalldNativeService::mergeProfiles(int32_t uid, const std::string& packageName,
-        const std::string& profileName, bool* _aidl_return) {
+        const std::string& profileName, int* _aidl_return) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_PACKAGE_NAME(packageName);
     std::lock_guard<std::recursive_mutex> lock(mLock);
@@ -2379,19 +2390,19 @@ binder::Status InstalldNativeService::destroyProfileSnapshot(const std::string& 
     return ok();
 }
 
-static const char* getCStr(const std::unique_ptr<std::string>& data,
+static const char* getCStr(const std::optional<std::string>& data,
         const char* default_value = nullptr) {
-    return data == nullptr ? default_value : data->c_str();
+    return data ? data->c_str() : default_value;
 }
 binder::Status InstalldNativeService::dexopt(const std::string& apkPath, int32_t uid,
-        const std::unique_ptr<std::string>& packageName, const std::string& instructionSet,
-        int32_t dexoptNeeded, const std::unique_ptr<std::string>& outputPath, int32_t dexFlags,
-        const std::string& compilerFilter, const std::unique_ptr<std::string>& uuid,
-        const std::unique_ptr<std::string>& classLoaderContext,
-        const std::unique_ptr<std::string>& seInfo, bool downgrade, int32_t targetSdkVersion,
-        const std::unique_ptr<std::string>& profileName,
-        const std::unique_ptr<std::string>& dexMetadataPath,
-        const std::unique_ptr<std::string>& compilationReason) {
+        const std::optional<std::string>& packageName, const std::string& instructionSet,
+        int32_t dexoptNeeded, const std::optional<std::string>& outputPath, int32_t dexFlags,
+        const std::string& compilerFilter, const std::optional<std::string>& uuid,
+        const std::optional<std::string>& classLoaderContext,
+        const std::optional<std::string>& seInfo, bool downgrade, int32_t targetSdkVersion,
+        const std::optional<std::string>& profileName,
+        const std::optional<std::string>& dexMetadataPath,
+        const std::optional<std::string>& compilationReason) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_UUID(uuid);
     CHECK_ARGUMENT_PATH(apkPath);
@@ -2437,7 +2448,7 @@ binder::Status InstalldNativeService::compileLayouts(const std::string& apkPath,
 }
 
 binder::Status InstalldNativeService::linkNativeLibraryDirectory(
-        const std::unique_ptr<std::string>& uuid, const std::string& packageName,
+        const std::optional<std::string>& uuid, const std::string& packageName,
         const std::string& nativeLibPath32, int32_t userId) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_UUID(uuid);
@@ -2528,7 +2539,7 @@ out:
     return res;
 }
 
-binder::Status InstalldNativeService::restoreconAppData(const std::unique_ptr<std::string>& uuid,
+binder::Status InstalldNativeService::restoreconAppData(const std::optional<std::string>& uuid,
         const std::string& packageName, int32_t userId, int32_t flags, int32_t appId,
         const std::string& seInfo) {
     ENFORCE_UID(AID_SYSTEM);
@@ -2646,7 +2657,8 @@ binder::Status InstalldNativeService::moveAb(const std::string& apkPath,
 }
 
 binder::Status InstalldNativeService::deleteOdex(const std::string& apkPath,
-        const std::string& instructionSet, const std::unique_ptr<std::string>& outputPath) {
+        const std::string& instructionSet, const std::optional<std::string>& outputPath,
+        int64_t* _aidl_return) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_PATH(apkPath);
     CHECK_ARGUMENT_PATH(outputPath);
@@ -2656,8 +2668,8 @@ binder::Status InstalldNativeService::deleteOdex(const std::string& apkPath,
     const char* instruction_set = instructionSet.c_str();
     const char* oat_dir = outputPath ? outputPath->c_str() : nullptr;
 
-    bool res = delete_odex(apk_path, instruction_set, oat_dir);
-    return res ? ok() : error();
+    *_aidl_return = delete_odex(apk_path, instruction_set, oat_dir);
+    return *_aidl_return == -1 ? error() : ok();
 }
 
 // This kernel feature is experimental.
@@ -2798,7 +2810,7 @@ binder::Status InstalldNativeService::assertFsverityRootHashMatches(const std::s
 
 binder::Status InstalldNativeService::reconcileSecondaryDexFile(
         const std::string& dexPath, const std::string& packageName, int32_t uid,
-        const std::vector<std::string>& isas, const std::unique_ptr<std::string>& volumeUuid,
+        const std::vector<std::string>& isas, const std::optional<std::string>& volumeUuid,
         int32_t storage_flag, bool* _aidl_return) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_UUID(volumeUuid);
@@ -2813,7 +2825,7 @@ binder::Status InstalldNativeService::reconcileSecondaryDexFile(
 
 binder::Status InstalldNativeService::hashSecondaryDexFile(
         const std::string& dexPath, const std::string& packageName, int32_t uid,
-        const std::unique_ptr<std::string>& volumeUuid, int32_t storageFlag,
+        const std::optional<std::string>& volumeUuid, int32_t storageFlag,
         std::vector<uint8_t>* _aidl_return) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_UUID(volumeUuid);
@@ -2872,7 +2884,7 @@ binder::Status InstalldNativeService::invalidateMounts() {
 
 // Mount volume's CE and DE storage to mirror
 binder::Status InstalldNativeService::tryMountDataMirror(
-        const std::unique_ptr<std::string>& uuid) {
+        const std::optional<std::string>& uuid) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_UUID(uuid);
     if (!sAppDataIsolationEnabled) {
@@ -2936,7 +2948,7 @@ binder::Status InstalldNativeService::tryMountDataMirror(
 
 // Unmount volume's CE and DE storage from mirror
 binder::Status InstalldNativeService::onPrivateVolumeRemoved(
-        const std::unique_ptr<std::string>& uuid) {
+        const std::optional<std::string>& uuid) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_UUID(uuid);
     if (!sAppDataIsolationEnabled) {
@@ -2980,7 +2992,7 @@ binder::Status InstalldNativeService::onPrivateVolumeRemoved(
 }
 
 std::string InstalldNativeService::findDataMediaPath(
-        const std::unique_ptr<std::string>& uuid, userid_t userid) {
+        const std::optional<std::string>& uuid, userid_t userid) {
     std::lock_guard<std::recursive_mutex> lock(mMountsLock);
     const char* uuid_ = uuid ? uuid->c_str() : nullptr;
     auto path = StringPrintf("%s/media", create_data_path(uuid_).c_str());
@@ -2993,15 +3005,14 @@ std::string InstalldNativeService::findDataMediaPath(
 }
 
 binder::Status InstalldNativeService::isQuotaSupported(
-        const std::unique_ptr<std::string>& uuid, bool* _aidl_return) {
-    auto uuidString = uuid ? *uuid : "";
-    *_aidl_return = IsQuotaSupported(uuidString);
+        const std::optional<std::string>& uuid, bool* _aidl_return) {
+    *_aidl_return = IsQuotaSupported(uuid.value_or(""));
     return ok();
 }
 
 binder::Status InstalldNativeService::prepareAppProfile(const std::string& packageName,
         int32_t userId, int32_t appId, const std::string& profileName, const std::string& codePath,
-        const std::unique_ptr<std::string>& dexMetadata, bool* _aidl_return) {
+        const std::optional<std::string>& dexMetadata, bool* _aidl_return) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_PACKAGE_NAME(packageName);
     CHECK_ARGUMENT_PATH(codePath);
