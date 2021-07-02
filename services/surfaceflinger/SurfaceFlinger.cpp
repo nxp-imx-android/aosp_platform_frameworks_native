@@ -310,6 +310,7 @@ Dataspace SurfaceFlinger::wideColorGamutCompositionDataspace = Dataspace::V0_SRG
 ui::PixelFormat SurfaceFlinger::wideColorGamutCompositionPixelFormat = ui::PixelFormat::RGBA_8888;
 bool SurfaceFlinger::useFrameRateApi;
 bool SurfaceFlinger::enableSdrDimming;
+bool SurfaceFlinger::enableLatchUnsignaled;
 
 std::string decodeDisplayColorSetting(DisplayColorSetting displayColorSetting) {
     switch(displayColorSetting) {
@@ -344,7 +345,8 @@ SurfaceFlinger::SurfaceFlinger(Factory& factory, SkipInitializationTag)
         mHwcServiceName(base::GetProperty("debug.sf.hwc_service_name"s, "default"s)),
         mTunnelModeEnabledReporter(new TunnelModeEnabledReporter()),
         mInternalDisplayDensity(getDensityFromProperty("ro.sf.lcd_density", true)),
-        mEmulatedDisplayDensity(getDensityFromProperty("qemu.sf.lcd_density", false)) {
+        mEmulatedDisplayDensity(getDensityFromProperty("qemu.sf.lcd_density", false)),
+        mPowerAdvisor(*this) {
     ALOGI("Using HWComposer service: %s", mHwcServiceName.c_str());
 
     mSetInputWindowsListener = new SetInputWindowsListener([&]() { setInputWindowsFinished(); });
@@ -479,6 +481,8 @@ SurfaceFlinger::SurfaceFlinger(Factory& factory) : SurfaceFlinger(factory, SkipI
 
     // Debug property overrides ro. property
     enableSdrDimming = property_get_bool("debug.sf.enable_sdr_dimming", enable_sdr_dimming(false));
+
+    enableLatchUnsignaled = base::GetBoolProperty("debug.sf.latch_unsignaled"s, false);
 }
 
 SurfaceFlinger::~SurfaceFlinger() = default;
@@ -815,6 +819,8 @@ void SurfaceFlinger::init() {
 
     // set initial conditions (e.g. unblank default device)
     initializeDisplays();
+
+    mPowerAdvisor.init();
 
     char primeShaderCache[PROPERTY_VALUE_MAX];
     property_get("service.sf.prime_shader_cache", primeShaderCache, "1");
@@ -1183,6 +1189,10 @@ void SurfaceFlinger::setActiveModeInternal() {
     updatePhaseConfiguration(refreshRate);
     ATRACE_INT("ActiveConfigFPS", refreshRate.getValue());
 
+    if (mRefreshRateOverlay) {
+        mRefreshRateOverlay->changeRefreshRate(upcomingMode->getFps());
+    }
+
     if (mUpcomingActiveMode.event != Scheduler::ModeEvent::None) {
         const nsecs_t vsyncPeriod = refreshRate.getPeriodNsecs();
         const auto physicalId = display->getPhysicalId();
@@ -1265,12 +1275,22 @@ void SurfaceFlinger::performSetActiveMode() {
     }
 
     mScheduler->onNewVsyncPeriodChangeTimeline(outTimeline);
-    if (mRefreshRateOverlay) {
-        mRefreshRateOverlay->changeRefreshRate(desiredMode->getFps());
-    }
 
     // Scheduler will submit an empty frame to HWC if needed.
     mSetActiveModePending = true;
+}
+
+void SurfaceFlinger::disableExpensiveRendering() {
+    schedule([=]() MAIN_THREAD {
+        ATRACE_CALL();
+        if (mPowerAdvisor.isUsingExpensiveRendering()) {
+            const auto& displays = ON_MAIN_THREAD(mDisplays);
+            for (const auto& [_, display] : displays) {
+                const static constexpr auto kDisable = false;
+                mPowerAdvisor.setExpensiveRenderingExpected(display->getId(), kDisable);
+            }
+        }
+    }).wait();
 }
 
 std::vector<ColorMode> SurfaceFlinger::getDisplayColorModes(PhysicalDisplayId displayId) {
@@ -2070,6 +2090,7 @@ void SurfaceFlinger::onMessageRefresh() {
     const auto prevVsyncTime = mScheduler->getPreviousVsyncFrom(mExpectedPresentTime);
     const auto hwcMinWorkDuration = mVsyncConfiguration->getCurrentConfigs().hwcMinWorkDuration;
     refreshArgs.earliestPresentTime = prevVsyncTime - hwcMinWorkDuration;
+    refreshArgs.previousPresentFence = mPreviousPresentFences[0].fenceTime;
     refreshArgs.nextInvalidateTime = mEventQueue->nextExpectedInvalidate();
 
     mGeometryInvalid = false;
@@ -3233,19 +3254,10 @@ void SurfaceFlinger::commitTransactionLocked() {
         }
     }
 
-    // TODO(b/163019109): See if this traversal is needed at all...
-    if (!mOffscreenLayers.empty()) {
-        mDrawingState.traverse([&](Layer* layer) {
-            // If the layer can be reached when traversing mDrawingState, then the layer is no
-            // longer offscreen. Remove the layer from the offscreenLayer set.
-            if (mOffscreenLayers.count(layer)) {
-                mOffscreenLayers.erase(layer);
-            }
-        });
-    }
-
     commitOffscreenLayers();
-    mDrawingState.traverse([&](Layer* layer) { layer->updateMirrorInfo(); });
+    if (mNumClones > 0) {
+        mDrawingState.traverse([&](Layer* layer) { layer->updateMirrorInfo(); });
+    }
 }
 
 void SurfaceFlinger::commitOffscreenLayers() {
@@ -3351,7 +3363,9 @@ bool SurfaceFlinger::handlePageFlip() {
         mBootStage = BootStage::BOOTANIMATION;
     }
 
-    mDrawingState.traverse([&](Layer* layer) { layer->updateCloneBufferInfo(); });
+    if (mNumClones > 0) {
+        mDrawingState.traverse([&](Layer* layer) { layer->updateCloneBufferInfo(); });
+    }
 
     // Only continue with the refresh if there is actually new work to do
     return !mLayersWithQueuedFrames.empty() && newDataLatched;
@@ -3571,7 +3585,7 @@ bool SurfaceFlinger::transactionIsReadyToBeApplied(
     for (const ComposerState& state : states) {
         const layer_state_t& s = state.state;
         const bool acquireFenceChanged = (s.what & layer_state_t::eAcquireFenceChanged);
-        if (acquireFenceChanged && s.acquireFence &&
+        if (acquireFenceChanged && s.acquireFence && !enableLatchUnsignaled &&
             s.acquireFence->getStatus() == Fence::Status::Unsignaled) {
             ATRACE_NAME("fence unsignaled");
             return false;
@@ -4236,7 +4250,7 @@ status_t SurfaceFlinger::mirrorLayer(const sp<Client>& client, const sp<IBinder>
             return result;
         }
 
-        mirrorLayer->mClonedChild = mirrorFrom->createClone();
+        mirrorLayer->setClonedChild(mirrorFrom->createClone());
     }
 
     *outLayerId = mirrorLayer->sequence;
@@ -6602,7 +6616,7 @@ void SurfaceFlinger::onLayerFirstRef(Layer* layer) {
 
 void SurfaceFlinger::onLayerDestroyed(Layer* layer) {
     mNumLayers--;
-    removeFromOffscreenLayers(layer);
+    removeHierarchyFromOffscreenLayers(layer);
     if (!layer->isRemovedFromCurrentState()) {
         mScheduler->deregisterLayer(layer);
     }
@@ -6615,10 +6629,14 @@ void SurfaceFlinger::onLayerDestroyed(Layer* layer) {
 // from dangling children layers such that they are not reachable from the
 // Drawing state nor the offscreen layer list
 // See b/141111965
-void SurfaceFlinger::removeFromOffscreenLayers(Layer* layer) {
+void SurfaceFlinger::removeHierarchyFromOffscreenLayers(Layer* layer) {
     for (auto& child : layer->getCurrentChildren()) {
         mOffscreenLayers.emplace(child.get());
     }
+    mOffscreenLayers.erase(layer);
+}
+
+void SurfaceFlinger::removeFromOffscreenLayers(Layer* layer) {
     mOffscreenLayers.erase(layer);
 }
 
