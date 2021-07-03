@@ -270,6 +270,8 @@ public:
     // being treated as native display brightness
     static bool enableSdrDimming;
 
+    static bool enableLatchUnsignaled;
+
     // must be called before clients can connect
     void init() ANDROID_API;
 
@@ -311,7 +313,11 @@ public:
     void onLayerFirstRef(Layer*);
     void onLayerDestroyed(Layer*);
 
+    void removeHierarchyFromOffscreenLayers(Layer* layer);
     void removeFromOffscreenLayers(Layer* layer);
+
+    // TODO: Remove atomic if move dtor to main thread CL lands
+    std::atomic<uint32_t> mNumClones;
 
     TransactionCallbackInvoker& getTransactionCallbackInvoker() {
         return mTransactionCallbackInvoker;
@@ -328,6 +334,10 @@ public:
     // debug.sf.disable_client_composition_cache
     bool mDisableClientCompositionCache = false;
     void setInputWindowsFinished();
+
+    // Disables expensive rendering for all displays
+    // This is scheduled on the main thread
+    void disableExpensiveRendering();
 
 protected:
     // We're reference counted, never destroy SurfaceFlinger directly
@@ -364,6 +374,7 @@ private:
     // For unit tests
     friend class TestableSurfaceFlinger;
     friend class TransactionApplicationTest;
+    friend class TunnelModeEnabledReporterTest;
 
     using RefreshRate = scheduler::RefreshRateConfigs::RefreshRate;
     using VsyncModulator = scheduler::VsyncModulator;
@@ -1228,8 +1239,14 @@ private:
     // don't need synchronization
     State mDrawingState{LayerVector::StateSet::Drawing};
     bool mVisibleRegionsDirty = false;
-    // Set during transaction commit stage to track if the input info for a layer has changed.
+
+    // Set during transaction application stage to track if the input info or children
+    // for a layer has changed.
+    // TODO: Also move visibleRegions over to a boolean system.
     bool mInputInfoChanged = false;
+    bool mSomeChildrenChanged;
+    bool mForceTransactionDisplayChange = false;
+
     bool mGeometryInvalid = false;
     bool mAnimCompositionPending = false;
 

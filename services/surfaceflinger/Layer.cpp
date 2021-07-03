@@ -70,6 +70,7 @@
 #include "MonitoredProducer.h"
 #include "SurfaceFlinger.h"
 #include "TimeStats/TimeStats.h"
+#include "TunnelModeEnabledReporter.h"
 #include "input/InputWindow.h"
 
 #define DEBUG_RESIZE 0
@@ -172,6 +173,13 @@ Layer::~Layer() {
 
     mFrameTracker.logAndResetStats(mName);
     mFlinger->onLayerDestroyed(this);
+
+    if (mDrawingState.sidebandStream != nullptr) {
+        mFlinger->mTunnelModeEnabledReporter->decrementTunnelModeCount();
+    }
+    if (mHadClonedChild) {
+        mFlinger->mNumClones--;
+    }
 }
 
 LayerCreationArgs::LayerCreationArgs(SurfaceFlinger* flinger, sp<Client> client, std::string name,
@@ -249,6 +257,7 @@ void Layer::addToCurrentState() {
     if (mRemovedFromDrawingState) {
         mRemovedFromDrawingState = false;
         mFlinger->mScheduler->registerLayer(this);
+        mFlinger->removeFromOffscreenLayers(this);
     }
 
     for (const auto& child : mCurrentChildren) {
@@ -679,11 +688,6 @@ bool Layer::isSecure() const {
 uint32_t Layer::doTransaction(uint32_t flags) {
     ATRACE_CALL();
 
-    if (mChildrenChanged) {
-        flags |= eVisibleRegion;
-        mChildrenChanged = false;
-    }
-
     // TODO: This is unfortunate.
     mDrawingStateModified = mDrawingState.modified;
     mDrawingState.modified = false;
@@ -703,11 +707,6 @@ uint32_t Layer::doTransaction(uint32_t flags) {
 
         // we may use linear filtering, if the matrix scales us
         mNeedsFiltering = getActiveTransform(s).needsBilinearFiltering();
-    }
-
-    if (mDrawingState.inputInfoChanged) {
-        flags |= eInputInfoChanged;
-        mDrawingState.inputInfoChanged = false;
     }
 
     commitTransaction(mDrawingState);
@@ -782,6 +781,8 @@ bool Layer::setLayer(int32_t z) {
     mDrawingState.z = z;
     mDrawingState.modified = true;
 
+    mFlinger->mSomeChildrenChanged = true;
+
     // Discard all relative layering.
     if (mDrawingState.zOrderRelativeOf != nullptr) {
         sp<Layer> strongRelative = mDrawingState.zOrderRelativeOf.promote();
@@ -831,6 +832,8 @@ bool Layer::setRelativeLayer(const sp<IBinder>& relativeToHandle, int32_t relati
         mDrawingState.zOrderRelativeOf == relative) {
         return false;
     }
+
+    mFlinger->mSomeChildrenChanged = true;
 
     mDrawingState.sequence++;
     mDrawingState.modified = true;
@@ -1562,7 +1565,7 @@ void Layer::setGameModeForTree(int parentGameMode) {
 }
 
 void Layer::addChild(const sp<Layer>& layer) {
-    mChildrenChanged = true;
+    mFlinger->mSomeChildrenChanged = true;
     setTransactionFlags(eTransactionNeeded);
 
     mCurrentChildren.add(layer);
@@ -1572,7 +1575,7 @@ void Layer::addChild(const sp<Layer>& layer) {
 }
 
 ssize_t Layer::removeChild(const sp<Layer>& layer) {
-    mChildrenChanged = true;
+    mFlinger->mSomeChildrenChanged = true;
     setTransactionFlags(eTransactionNeeded);
 
     layer->setParent(nullptr);
@@ -1991,7 +1994,7 @@ void Layer::setInputInfo(const InputWindowInfo& info) {
     mDrawingState.inputInfo = info;
     mDrawingState.touchableRegionCrop = extractLayerFromBinder(info.touchableRegionCropHandle);
     mDrawingState.modified = true;
-    mDrawingState.inputInfoChanged = true;
+    mFlinger->mInputInfoChanged = true;
     setTransactionFlags(eTransactionNeeded);
 }
 
@@ -2534,6 +2537,12 @@ bool Layer::getPrimaryDisplayOnly() const {
 
     sp<Layer> parent = mDrawingParent.promote();
     return parent == nullptr ? false : parent->getPrimaryDisplayOnly();
+}
+
+void Layer::setClonedChild(const sp<Layer>& clonedChild) {
+    mClonedChild = clonedChild;
+    mHadClonedChild = true;
+    mFlinger->mNumClones++;
 }
 
 // ---------------------------------------------------------------------------

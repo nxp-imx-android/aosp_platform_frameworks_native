@@ -41,6 +41,10 @@ const auto kScaleAsymmetric = mat4(0.8f, 0.f,  0.f, 0.f,
                                    0.f,  1.1f, 0.f, 0.f,
                                    0.f,  0.f,  1.f, 0.f,
                                    0.f,  0.f,  0.f, 1.f);
+const auto kFlip = mat4(1.1f, -0.1f,  0.f, 0.f,
+                        0.1f,  1.1f,  0.f, 0.f,
+                        0.f,    0.f,  1.f, 0.f,
+                        2.f,    2.f,  0.f, 1.f);
 // clang-format on
 // When setting layer.sourceDataspace, whether it matches the destination or not determines whether
 // a color correction effect is added to the shader.
@@ -72,6 +76,8 @@ static void drawShadowLayers(SkiaRenderEngine* renderengine, const DisplaySettin
             // have color correction added, and important that it be srgb, so the *vertex* shader
             // doesn't have color correction added.
             .sourceDataspace = kDestDataSpace,
+            // setting this is mandatory for shadows and blurs
+            .skipContentDraw = true,
     };
 
     auto layers = std::vector<const LayerSettings*>{&layer};
@@ -97,6 +103,9 @@ static void drawImageLayers(SkiaRenderEngine* renderengine, const DisplaySetting
     LayerSettings layer{
             .geometry =
                     Geometry{
+                            // The position transform doesn't matter when the reduced shader mode
+                            // in in effect. A matrix transform stage is always included.
+                            .positionTransform = mat4(),
                             .boundaries = rect,
                             .roundedCornersCrop = rect,
                     },
@@ -107,29 +116,20 @@ static void drawImageLayers(SkiaRenderEngine* renderengine, const DisplaySetting
                                           }},
     };
 
-    auto threeCornerRadii = {0.0f, 0.05f, 50.f};
-    auto oneCornerRadius = {50.f};
-
-    // Test both drawRect and drawRRect
     auto layers = std::vector<const LayerSettings*>{&layer};
     for (auto dataspace : {kDestDataSpace, kOtherDataSpace}) {
         layer.sourceDataspace = dataspace;
-        for (bool identity : {true, false}) {
-            layer.geometry.positionTransform = identity ? mat4() : kScaleAndTranslate;
-            // Corner radii less than 0.5 creates a special shader. This likely occurs in real usage
-            // due to animating corner radius.
-            // For the non-idenity matrix, only the large corner radius will create a new shader.
-            for (float roundedCornersRadius : identity ? threeCornerRadii : oneCornerRadius) {
-                // roundedCornersCrop is always set, but it is this radius that triggers the
-                // behavior
-                layer.geometry.roundedCornersRadius = roundedCornersRadius;
-                for (bool isOpaque : {true, false}) {
-                    layer.source.buffer.isOpaque = isOpaque;
-                    for (auto alpha : {half(.23999f), half(1.0f)}) {
-                        layer.alpha = alpha;
-                        renderengine->drawLayers(display, layers, dstTexture, kUseFrameBufferCache,
-                                                 base::unique_fd(), nullptr);
-                    }
+        // Cache shaders for both rects and round rects.
+        // In reduced shader mode, all non-zero round rect radii get the same code path.
+        for (float roundedCornersRadius : {0.0f, 50.0f}) {
+            // roundedCornersCrop is always set, but the radius triggers the behavior
+            layer.geometry.roundedCornersRadius = roundedCornersRadius;
+            for (bool isOpaque : {true, false}) {
+                layer.source.buffer.isOpaque = isOpaque;
+                for (auto alpha : {half(.2f), half(1.0f)}) {
+                    layer.alpha = alpha;
+                    renderengine->drawLayers(display, layers, dstTexture, kUseFrameBufferCache,
+                                             base::unique_fd(), nullptr);
                 }
             }
         }
@@ -155,7 +155,7 @@ static void drawSolidLayers(SkiaRenderEngine* renderengine, const DisplaySetting
     auto layers = std::vector<const LayerSettings*>{&layer};
     for (auto transform : {mat4(), kScaleAndTranslate}) {
         layer.geometry.positionTransform = transform;
-        for (float roundedCornersRadius : {0.0f, 0.05f, 50.f}) {
+        for (float roundedCornersRadius : {0.0f, 50.f}) {
             layer.geometry.roundedCornersRadius = roundedCornersRadius;
             renderengine->drawLayers(display, layers, dstTexture, kUseFrameBufferCache,
                                      base::unique_fd(), nullptr);
@@ -173,9 +173,12 @@ static void drawBlurLayers(SkiaRenderEngine* renderengine, const DisplaySettings
                             .boundaries = rect,
                     },
             .alpha = 1,
+            // setting this is mandatory for shadows and blurs
+            .skipContentDraw = true,
     };
 
     auto layers = std::vector<const LayerSettings*>{&layer};
+    // Different blur code is invoked for radii less and greater than 30 pixels
     for (int radius : {9, 60}) {
         layer.backgroundBlurRadius = radius;
         renderengine->drawLayers(display, layers, dstTexture, kUseFrameBufferCache,
@@ -220,11 +223,9 @@ static void drawClippedLayers(SkiaRenderEngine* renderengine, const DisplaySetti
         layer.source = pixelSource;
         for (auto dataspace : {kDestDataSpace, kOtherDataSpace}) {
             layer.sourceDataspace = dataspace;
-            // Produce a CircularRRect clip and an EllipticalRRect clip
+            // Produce a CircularRRect clip and an EllipticalRRect clip.
             for (auto transform : {kScaleAndTranslate, kScaleAsymmetric}) {
                 layer.geometry.positionTransform = transform;
-                // In real use, I saw alpha of 1.0 and 0.999, probably a mistake, but cache both
-                // shaders.
                 for (float alpha : {0.5f, 1.f}) {
                     layer.alpha = alpha,
                     renderengine->drawLayers(display, layers, dstTexture, kUseFrameBufferCache,
@@ -233,6 +234,69 @@ static void drawClippedLayers(SkiaRenderEngine* renderengine, const DisplaySetti
             }
         }
     }
+}
+
+static void drawPIPImageLayer(SkiaRenderEngine* renderengine, const DisplaySettings& display,
+                            const std::shared_ptr<ExternalTexture>& dstTexture,
+                            const std::shared_ptr<ExternalTexture>& srcTexture) {
+    const Rect& displayRect = display.physicalDisplay;
+    FloatRect rect(0, 0, displayRect.width(), displayRect.height());
+    LayerSettings layer{
+            .geometry =
+                    Geometry{
+                            // Note that this flip matrix only makes a difference when clipping,
+                            // which happens in this layer because the roundrect crop is just a bit
+                            // larger than the layer bounds.
+                            .positionTransform = kFlip,
+                            .boundaries = rect,
+                            .roundedCornersRadius = 94.2551,
+                            .roundedCornersCrop = FloatRect(
+                                -93.75, 0, displayRect.width() + 93.75, displayRect.height()),
+                    },
+            .source = PixelSource{.buffer =
+                                          Buffer{
+                                                  .buffer = srcTexture,
+                                                  .maxLuminanceNits = 1000.f,
+                                                  .isOpaque = 0,
+                                                  .usePremultipliedAlpha = 1,
+                                          }},
+            .sourceDataspace = kOtherDataSpace,
+            .alpha = 1,
+
+    };
+
+    auto layers = std::vector<const LayerSettings*>{&layer};
+    renderengine->drawLayers(display, layers, dstTexture, kUseFrameBufferCache,
+                             base::unique_fd(), nullptr);
+}
+
+static void drawHolePunchLayer(SkiaRenderEngine* renderengine, const DisplaySettings& display,
+                            const std::shared_ptr<ExternalTexture>& dstTexture) {
+    const Rect& displayRect = display.physicalDisplay;
+    FloatRect rect(0, 0, displayRect.width(), displayRect.height());
+    FloatRect small(0, 0, displayRect.width()-20, displayRect.height()+20);
+    LayerSettings layer{
+            .geometry =
+                    Geometry{
+                            .positionTransform = kScaleAndTranslate,
+                            // the boundaries have to be smaller than the rounded crop so that
+                            // clipRRect is used instead of drawRRect
+                            .boundaries = small,
+                            .roundedCornersRadius = 50.f,
+                            .roundedCornersCrop = rect,
+                    },
+            .source = PixelSource{
+                            .solidColor = half3(0.f, 0.f, 0.f),
+                    },
+            .sourceDataspace = kDestDataSpace,
+            .alpha = 0,
+            .disableBlending = true,
+
+    };
+
+    auto layers = std::vector<const LayerSettings*>{&layer};
+    renderengine->drawLayers(display, layers, dstTexture, kUseFrameBufferCache,
+                            base::unique_fd(), nullptr);
 }
 
 //
@@ -246,8 +310,6 @@ static void drawClippedLayers(SkiaRenderEngine* renderengine, const DisplaySetti
 //    kFlushAfterEveryLayer = true
 // in external/skia/src/gpu/gl/builders/GrGLShaderStringBuilder.cpp
 //    gPrintSKSL = true
-//
-// TODO(b/184631553) cache the shader involved in youtube pip return.
 void Cache::primeShaderCache(SkiaRenderEngine* renderengine) {
     const int previousCount = renderengine->reportShadersCompiled();
     if (previousCount) {
@@ -289,7 +351,7 @@ void Cache::primeShaderCache(SkiaRenderEngine* renderengine) {
                 std::make_shared<ExternalTexture>(srcBuffer, *renderengine,
                                                   ExternalTexture::Usage::READABLE |
                                                           ExternalTexture::Usage::WRITEABLE);
-
+        drawHolePunchLayer(renderengine, display, dstTexture);
         drawSolidLayers(renderengine, display, dstTexture);
         drawShadowLayers(renderengine, display, srcTexture);
 
@@ -297,24 +359,38 @@ void Cache::primeShaderCache(SkiaRenderEngine* renderengine) {
             drawBlurLayers(renderengine, display, dstTexture);
         }
 
-        // The majority of shaders are related to sampling images.
-        drawImageLayers(renderengine, display, dstTexture, srcTexture);
-
         // should be the same as AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE;
         const int64_t usageExternal = GRALLOC_USAGE_HW_TEXTURE;
-
         sp<GraphicBuffer> externalBuffer =
                 new GraphicBuffer(displayRect.width(), displayRect.height(), PIXEL_FORMAT_RGBA_8888,
                                   1, usageExternal, "primeShaderCache_external");
         const auto externalTexture =
                 std::make_shared<ExternalTexture>(externalBuffer, *renderengine,
                                                   ExternalTexture::Usage::READABLE);
-        // TODO(b/184665179) doubles number of image shader compilations, but only somewhere
-        // between 6 and 8 will occur in real uses.
-        drawImageLayers(renderengine, display, dstTexture, externalTexture);
 
-        // Draw layers for b/185569240.
-        drawClippedLayers(renderengine, display, dstTexture, externalTexture);
+        // Another external texture with a different pixel format triggers useIsOpaqueWorkaround
+        sp<GraphicBuffer> f16ExternalBuffer =
+                new GraphicBuffer(displayRect.width(), displayRect.height(), PIXEL_FORMAT_RGBA_FP16,
+                                  1, usageExternal, "primeShaderCache_external_f16");
+        const auto f16ExternalTexture =
+                std::make_shared<ExternalTexture>(f16ExternalBuffer, *renderengine,
+                                                  ExternalTexture::Usage::READABLE);
+
+        // The majority of shaders are related to sampling images.
+        // These need to be generated with various source textures
+        // The F16 texture may not be usable on all devices, so check first that it was created with
+        // the requested usage bit.
+        auto textures = {srcTexture, externalTexture};
+        auto texturesWithF16 = {srcTexture, externalTexture, f16ExternalTexture};
+        bool canUsef16 = f16ExternalBuffer->getUsage() & GRALLOC_USAGE_HW_TEXTURE;
+
+        for (auto texture : canUsef16 ? texturesWithF16 : textures) {
+            drawImageLayers(renderengine, display, dstTexture, texture);
+            // Draw layers for b/185569240.
+            drawClippedLayers(renderengine, display, dstTexture, texture);
+        }
+
+        drawPIPImageLayer(renderengine, display, dstTexture, externalTexture);
 
         const nsecs_t timeAfter = systemTime();
         const float compileTimeMs = static_cast<float>(timeAfter - timeBefore) / 1.0E6;
