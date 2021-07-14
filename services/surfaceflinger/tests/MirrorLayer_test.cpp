@@ -36,7 +36,7 @@ protected:
         asTransaction([&](Transaction& t) {
             t.setDisplayLayerStack(display, 0);
             t.setLayer(mParentLayer, INT32_MAX - 2).show(mParentLayer);
-            t.setCrop_legacy(mChildLayer, Rect(0, 0, 400, 400)).show(mChildLayer);
+            t.setCrop(mChildLayer, Rect(0, 0, 400, 400)).show(mChildLayer);
             t.setPosition(mChildLayer, 50, 50);
             t.setFlags(mParentLayer, layer_state_t::eLayerOpaque, layer_state_t::eLayerOpaque);
             t.setFlags(mChildLayer, layer_state_t::eLayerOpaque, layer_state_t::eLayerOpaque);
@@ -58,7 +58,7 @@ TEST_F(MirrorLayerTest, MirrorColorLayer) {
             createColorLayer("Grandchild layer", Color::BLUE, mChildLayer.get());
     Transaction()
             .setFlags(grandchild, layer_state_t::eLayerOpaque, layer_state_t::eLayerOpaque)
-            .setCrop_legacy(grandchild, Rect(0, 0, 200, 200))
+            .setCrop(grandchild, Rect(0, 0, 200, 200))
             .show(grandchild)
             .apply();
 
@@ -68,7 +68,7 @@ TEST_F(MirrorLayerTest, MirrorColorLayer) {
 
     // Add mirrorLayer as child of mParentLayer so it's shown on the display
     Transaction()
-            .reparent(mirrorLayer, mParentLayer->getHandle())
+            .reparent(mirrorLayer, mParentLayer)
             .setPosition(mirrorLayer, 500, 500)
             .show(mirrorLayer)
             .apply();
@@ -127,7 +127,7 @@ TEST_F(MirrorLayerTest, MirrorColorLayer) {
     }
 
     // Add grandchild layer to offscreen layer
-    Transaction().reparent(grandchild, mChildLayer->getHandle()).apply();
+    Transaction().reparent(grandchild, mChildLayer).apply();
     {
         SCOPED_TRACE("Added Grandchild Layer");
         auto shot = screenshot();
@@ -138,7 +138,7 @@ TEST_F(MirrorLayerTest, MirrorColorLayer) {
     }
 
     // Add child layer
-    Transaction().reparent(mChildLayer, mParentLayer->getHandle()).apply();
+    Transaction().reparent(mChildLayer, mParentLayer).apply();
     {
         SCOPED_TRACE("Added Child Layer");
         auto shot = screenshot();
@@ -157,7 +157,7 @@ TEST_F(MirrorLayerTest, MirrorBufferLayer) {
 
     sp<SurfaceControl> mirrorLayer = mClient->mirrorSurface(mChildLayer.get());
     Transaction()
-            .reparent(mirrorLayer, mParentLayer->getHandle())
+            .reparent(mirrorLayer, mParentLayer)
             .setPosition(mirrorLayer, 500, 500)
             .show(mirrorLayer)
             .apply();
@@ -195,7 +195,7 @@ TEST_F(MirrorLayerTest, MirrorBufferLayer) {
             createLayer("BufferStateLayer", 200, 200, ISurfaceComposerClient::eFXSurfaceBufferState,
                         mChildLayer.get());
     fillBufferStateLayerColor(bufferStateLayer, Color::BLUE, 200, 200);
-    Transaction().setFrame(bufferStateLayer, Rect(0, 0, 200, 200)).show(bufferStateLayer).apply();
+    Transaction().show(bufferStateLayer).apply();
 
     {
         SCOPED_TRACE("Initial Mirror BufferStateLayer");
