@@ -355,7 +355,7 @@ TEST_F(CachedSetTest, render) {
     expectReadyBuffer(cachedSet);
 
     EXPECT_EQ(mOutputState.framebufferSpace, cachedSet.getOutputSpace());
-    EXPECT_EQ(mOutputState.framebufferSpace.content, cachedSet.getTextureBounds());
+    EXPECT_EQ(Rect(kOutputSize.width, kOutputSize.height), cachedSet.getTextureBounds());
 
     // Now check that appending a new cached set properly cleans up RenderEngine resources.
     CachedSet::Layer& layer3 = *mTestLayers[2]->cachedSetLayer.get();
@@ -445,6 +445,20 @@ TEST_F(CachedSetTest, holePunch_requiresSingleLayer) {
 
 TEST_F(CachedSetTest, holePunch_requiresNonHdr) {
     mTestLayers[0]->outputLayerCompositionState.dataspace = ui::Dataspace::BT2020_PQ;
+    mTestLayers[0]->layerState->update(&mTestLayers[0]->outputLayer);
+
+    CachedSet::Layer& layer = *mTestLayers[0]->cachedSetLayer.get();
+    mTestLayers[0]->layerFECompositionState.buffer = sp<GraphicBuffer>::make();
+    sp<mock::LayerFE> layerFE = mTestLayers[0]->layerFE;
+
+    CachedSet cachedSet(layer);
+    EXPECT_CALL(*layerFE, hasRoundedCorners()).WillRepeatedly(Return(true));
+
+    EXPECT_FALSE(cachedSet.requiresHolePunch());
+}
+
+TEST_F(CachedSetTest, holePunch_requiresNonBT601_625) {
+    mTestLayers[0]->outputLayerCompositionState.dataspace = ui::Dataspace::STANDARD_BT601_625;
     mTestLayers[0]->layerState->update(&mTestLayers[0]->outputLayer);
 
     CachedSet::Layer& layer = *mTestLayers[0]->cachedSetLayer.get();

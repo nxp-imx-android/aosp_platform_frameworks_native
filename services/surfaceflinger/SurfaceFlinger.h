@@ -270,6 +270,8 @@ public:
     // being treated as native display brightness
     static bool enableSdrDimming;
 
+    static bool enableLatchUnsignaled;
+
     // must be called before clients can connect
     void init() ANDROID_API;
 
@@ -311,7 +313,11 @@ public:
     void onLayerFirstRef(Layer*);
     void onLayerDestroyed(Layer*);
 
+    void removeHierarchyFromOffscreenLayers(Layer* layer);
     void removeFromOffscreenLayers(Layer* layer);
+
+    // TODO: Remove atomic if move dtor to main thread CL lands
+    std::atomic<uint32_t> mNumClones;
 
     TransactionCallbackInvoker& getTransactionCallbackInvoker() {
         return mTransactionCallbackInvoker;
@@ -328,6 +334,10 @@ public:
     // debug.sf.disable_client_composition_cache
     bool mDisableClientCompositionCache = false;
     void setInputWindowsFinished();
+
+    // Disables expensive rendering for all displays
+    // This is scheduled on the main thread
+    void disableExpensiveRendering();
 
 protected:
     // We're reference counted, never destroy SurfaceFlinger directly

@@ -177,6 +177,9 @@ Layer::~Layer() {
     if (mDrawingState.sidebandStream != nullptr) {
         mFlinger->mTunnelModeEnabledReporter->decrementTunnelModeCount();
     }
+    if (mHadClonedChild) {
+        mFlinger->mNumClones--;
+    }
 }
 
 LayerCreationArgs::LayerCreationArgs(SurfaceFlinger* flinger, sp<Client> client, std::string name,
@@ -254,6 +257,7 @@ void Layer::addToCurrentState() {
     if (mRemovedFromDrawingState) {
         mRemovedFromDrawingState = false;
         mFlinger->mScheduler->registerLayer(this);
+        mFlinger->removeFromOffscreenLayers(this);
     }
 
     for (const auto& child : mCurrentChildren) {
@@ -576,8 +580,8 @@ std::optional<compositionengine::LayerFE::LayerSettings> Layer::prepareClientCom
     layerSettings.geometry.positionTransform = getTransform().asMatrix4();
 
     // skip drawing content if the targetSettings indicate the content will be occluded
-    layerSettings.skipContentDraw =
-            layerSettings.skipContentDraw || !targetSettings.realContentIsVisible;
+    const bool drawContent = targetSettings.realContentIsVisible || targetSettings.clearContent;
+    layerSettings.skipContentDraw = !drawContent;
 
     if (hasColorTransform()) {
         layerSettings.colorTransform = getColorTransform();
@@ -2533,6 +2537,12 @@ bool Layer::getPrimaryDisplayOnly() const {
 
     sp<Layer> parent = mDrawingParent.promote();
     return parent == nullptr ? false : parent->getPrimaryDisplayOnly();
+}
+
+void Layer::setClonedChild(const sp<Layer>& clonedChild) {
+    mClonedChild = clonedChild;
+    mHadClonedChild = true;
+    mFlinger->mNumClones++;
 }
 
 // ---------------------------------------------------------------------------
