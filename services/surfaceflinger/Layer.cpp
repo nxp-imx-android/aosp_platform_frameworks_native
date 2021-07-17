@@ -580,8 +580,8 @@ std::optional<compositionengine::LayerFE::LayerSettings> Layer::prepareClientCom
     layerSettings.geometry.positionTransform = getTransform().asMatrix4();
 
     // skip drawing content if the targetSettings indicate the content will be occluded
-    layerSettings.skipContentDraw =
-            layerSettings.skipContentDraw || !targetSettings.realContentIsVisible;
+    const bool drawContent = targetSettings.realContentIsVisible || targetSettings.clearContent;
+    layerSettings.skipContentDraw = !drawContent;
 
     if (hasColorTransform()) {
         layerSettings.colorTransform = getColorTransform();
@@ -958,7 +958,6 @@ bool Layer::setTransparentRegionHint(const Region& transparent) {
 }
 
 bool Layer::setBlurRegions(const std::vector<BlurRegion>& blurRegions) {
-    mDrawingState.sequence++;
     mDrawingState.blurRegions = blurRegions;
     mDrawingState.modified = true;
     setTransactionFlags(eTransactionNeeded);
