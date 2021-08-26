@@ -271,6 +271,15 @@ cc_library_shared {
     defaults: ["libbinder_tls_defaults"],
 }
 
+// For testing
+cc_library_static {
+    name: "libbinder_tls_static",
+    defaults: ["libbinder_tls_defaults"],
+    visibility: [
+        ":__subpackages__",
+    ],
+}
+
 // AIDL interface between libbinder and framework.jar
 filegroup {
     name: "libbinder_aidl",
@@ -329,6 +338,8 @@ cc_library {
         "//packages/modules/Virtualization/authfs:__subpackages__",
         "//packages/modules/Virtualization/compos:__subpackages__",
         "//packages/modules/Virtualization/microdroid",
+        "//packages/modules/Virtualization/microdroid_manager",
+        "//packages/modules/Virtualization/virtualizationservice",
     ],
 }
 
