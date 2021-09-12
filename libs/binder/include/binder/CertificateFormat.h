@@ -14,13 +14,15 @@
  * limitations under the License.
  */
 
+// Formats for serializing TLS certificate.
+
 #pragma once
 
-extern "C" {
+namespace android {
 
-struct AIBinder;
+enum class CertificateFormat {
+    PEM,
+    // TODO(b/195166979): support other formats, e.g. DER
+};
 
-bool RunRpcServer(AIBinder* service, unsigned int port);
-AIBinder* RpcClient(unsigned int cid, unsigned int port);
-
-}
+} // namespace android
