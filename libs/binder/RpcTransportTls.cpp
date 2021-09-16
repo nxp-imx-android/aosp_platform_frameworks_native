@@ -22,10 +22,12 @@
 #include <openssl/bn.h>
 #include <openssl/ssl.h>
 
+#include <binder/RpcCertificateUtils.h>
 #include <binder/RpcTransportTls.h>
 
 #include "FdTrigger.h"
 #include "RpcState.h"
+#include "Utils.h"
 
 #define SHOULD_LOG_TLS_DETAIL false
 
@@ -34,14 +36,6 @@
 #else
 #define LOG_TLS_DETAIL(...) ALOGV(__VA_ARGS__) // for type checking
 #endif
-
-#define TEST_AND_RETURN(value, expr)            \
-    do {                                        \
-        if (!(expr)) {                          \
-            ALOGE("Failed to call: %s", #expr); \
-            return value;                       \
-        }                                       \
-    } while (0)
 
 using android::base::ErrnoError;
 using android::base::Error;
@@ -325,8 +319,6 @@ public:
 private:
     android::base::unique_fd mSocket;
     Ssl mSsl;
-
-    static status_t isTriggered(FdTrigger* fdTrigger);
 };
 
 // Error code is errno.
@@ -347,15 +339,6 @@ Result<size_t> RpcTransportTls::peek(void* buf, size_t size) {
     return ret;
 }
 
-status_t RpcTransportTls::isTriggered(FdTrigger* fdTrigger) {
-    auto ret = fdTrigger->isTriggeredPolled();
-    if (!ret.ok()) {
-        ALOGE("%s: %s", __PRETTY_FUNCTION__, ret.error().message().c_str());
-        return ret.error().code() == 0 ? UNKNOWN_ERROR : -ret.error().code();
-    }
-    return OK;
-}
-
 status_t RpcTransportTls::interruptableWriteFully(FdTrigger* fdTrigger, const void* data,
                                                   size_t size) {
     auto buffer = reinterpret_cast<const uint8_t*>(data);
@@ -365,7 +348,7 @@ status_t RpcTransportTls::interruptableWriteFully(FdTrigger* fdTrigger, const vo
 
     // Before doing any I/O, check trigger once. This ensures the trigger is checked at least
     // once. The trigger is also checked via triggerablePoll() after every SSL_write().
-    if (status_t status = isTriggered(fdTrigger); status != OK) return status;
+    if (fdTrigger->isTriggered()) return -ECANCELED;
 
     while (buffer < end) {
         size_t todo = std::min<size_t>(end - buffer, std::numeric_limits<int>::max());
@@ -396,7 +379,7 @@ status_t RpcTransportTls::interruptableReadFully(FdTrigger* fdTrigger, void* dat
 
     // Before doing any I/O, check trigger once. This ensures the trigger is checked at least
     // once. The trigger is also checked via triggerablePoll() after every SSL_write().
-    if (status_t status = isTriggered(fdTrigger); status != OK) return status;
+    if (fdTrigger->isTriggered()) return -ECANCELED;
 
     while (buffer < end) {
         size_t todo = std::min<size_t>(end - buffer, std::numeric_limits<int>::max());
@@ -453,31 +436,54 @@ class RpcTransportCtxTls : public RpcTransportCtx {
 public:
     template <typename Impl,
               typename = std::enable_if_t<std::is_base_of_v<RpcTransportCtxTls, Impl>>>
-    static std::unique_ptr<RpcTransportCtxTls> create();
+    static std::unique_ptr<RpcTransportCtxTls> create(
+            std::shared_ptr<RpcCertificateVerifier> verifier);
     std::unique_ptr<RpcTransport> newTransport(android::base::unique_fd fd,
                                                FdTrigger* fdTrigger) const override;
-    std::string getCertificate(CertificateFormat) const override;
-    status_t addTrustedPeerCertificate(CertificateFormat, std::string_view cert) override;
+    std::vector<uint8_t> getCertificate(RpcCertificateFormat) const override;
 
 protected:
+    static ssl_verify_result_t sslCustomVerify(SSL* ssl, uint8_t* outAlert);
     virtual void preHandshake(Ssl* ssl) const = 0;
     bssl::UniquePtr<SSL_CTX> mCtx;
+    std::shared_ptr<RpcCertificateVerifier> mCertVerifier;
 };
 
-std::string RpcTransportCtxTls::getCertificate(CertificateFormat) const {
-    // TODO(b/195166979): return certificate here
-    return {};
+std::vector<uint8_t> RpcTransportCtxTls::getCertificate(RpcCertificateFormat format) const {
+    X509* x509 = SSL_CTX_get0_certificate(mCtx.get()); // does not own
+    return serializeCertificate(x509, format);
 }
 
-status_t RpcTransportCtxTls::addTrustedPeerCertificate(CertificateFormat, std::string_view) {
-    // TODO(b/195166979): set certificate here
-    return OK;
+// Verify by comparing the leaf of peer certificate with every certificate in
+// mTrustedPeerCertificates. Does not support certificate chains.
+ssl_verify_result_t RpcTransportCtxTls::sslCustomVerify(SSL* ssl, uint8_t* outAlert) {
+    LOG_ALWAYS_FATAL_IF(outAlert == nullptr);
+    const char* logPrefix = SSL_is_server(ssl) ? "Server" : "Client";
+
+    bssl::UniquePtr<X509> peerCert(SSL_get_peer_certificate(ssl)); // Does not set error queue
+    LOG_ALWAYS_FATAL_IF(peerCert == nullptr,
+                        "%s: libssl should not ask to verify non-existing cert", logPrefix);
+
+    auto ctx = SSL_get_SSL_CTX(ssl); // Does not set error queue
+    LOG_ALWAYS_FATAL_IF(ctx == nullptr);
+    // void* -> RpcTransportCtxTls*
+    auto rpcTransportCtxTls = reinterpret_cast<RpcTransportCtxTls*>(SSL_CTX_get_app_data(ctx));
+    LOG_ALWAYS_FATAL_IF(rpcTransportCtxTls == nullptr);
+
+    status_t verifyStatus = rpcTransportCtxTls->mCertVerifier->verify(peerCert.get(), outAlert);
+    if (verifyStatus == OK) {
+        return ssl_verify_ok;
+    }
+    LOG_TLS_DETAIL("%s: Failed to verify client: status = %s, alert = %s", logPrefix,
+                   statusToString(verifyStatus).c_str(), SSL_alert_desc_string_long(*outAlert));
+    return ssl_verify_invalid;
 }
 
 // Common implementation for creating server and client contexts. The child class, |Impl|, is
 // provided as a template argument so that this function can initialize an |Impl| object.
 template <typename Impl, typename>
-std::unique_ptr<RpcTransportCtxTls> RpcTransportCtxTls::create() {
+std::unique_ptr<RpcTransportCtxTls> RpcTransportCtxTls::create(
+        std::shared_ptr<RpcCertificateVerifier> verifier) {
     bssl::UniquePtr<SSL_CTX> ctx(SSL_CTX_new(TLS_method()));
     TEST_AND_RETURN(nullptr, ctx != nullptr);
 
@@ -488,10 +494,10 @@ std::unique_ptr<RpcTransportCtxTls> RpcTransportCtxTls::create() {
     TEST_AND_RETURN(nullptr, SSL_CTX_use_PrivateKey(ctx.get(), evp_pkey.get()));
     TEST_AND_RETURN(nullptr, SSL_CTX_use_certificate(ctx.get(), cert.get()));
 
-    // TODO(b/195166979): peer should send certificate in a different channel, and this class
-    //  should verify it here.
-    SSL_CTX_set_custom_verify(ctx.get(), SSL_VERIFY_PEER,
-                              [](SSL*, uint8_t*) -> ssl_verify_result_t { return ssl_verify_ok; });
+    // Enable two-way authentication by setting SSL_VERIFY_FAIL_IF_NO_PEER_CERT on server.
+    // Client ignores SSL_VERIFY_FAIL_IF_NO_PEER_CERT flag.
+    SSL_CTX_set_custom_verify(ctx.get(), SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT,
+                              sslCustomVerify);
 
     // Require at least TLS 1.3
     TEST_AND_RETURN(nullptr, SSL_CTX_set_min_proto_version(ctx.get(), TLS1_3_VERSION));
@@ -501,7 +507,10 @@ std::unique_ptr<RpcTransportCtxTls> RpcTransportCtxTls::create() {
     }
 
     auto ret = std::make_unique<Impl>();
+    // RpcTransportCtxTls* -> void*
+    TEST_AND_RETURN(nullptr, SSL_CTX_set_app_data(ctx.get(), reinterpret_cast<void*>(ret.get())));
     ret->mCtx = std::move(ctx);
+    ret->mCertVerifier = std::move(verifier);
     return ret;
 }
 
@@ -533,19 +542,25 @@ protected:
 } // namespace
 
 std::unique_ptr<RpcTransportCtx> RpcTransportCtxFactoryTls::newServerCtx() const {
-    return android::RpcTransportCtxTls::create<RpcTransportCtxTlsServer>();
+    return android::RpcTransportCtxTls::create<RpcTransportCtxTlsServer>(mCertVerifier);
 }
 
 std::unique_ptr<RpcTransportCtx> RpcTransportCtxFactoryTls::newClientCtx() const {
-    return android::RpcTransportCtxTls::create<RpcTransportCtxTlsClient>();
+    return android::RpcTransportCtxTls::create<RpcTransportCtxTlsClient>(mCertVerifier);
 }
 
 const char* RpcTransportCtxFactoryTls::toCString() const {
     return "tls";
 }
 
-std::unique_ptr<RpcTransportCtxFactory> RpcTransportCtxFactoryTls::make() {
-    return std::unique_ptr<RpcTransportCtxFactoryTls>(new RpcTransportCtxFactoryTls());
+std::unique_ptr<RpcTransportCtxFactory> RpcTransportCtxFactoryTls::make(
+        std::shared_ptr<RpcCertificateVerifier> verifier) {
+    if (verifier == nullptr) {
+        ALOGE("%s: Must provide a certificate verifier", __PRETTY_FUNCTION__);
+        return nullptr;
+    }
+    return std::unique_ptr<RpcTransportCtxFactoryTls>(
+            new RpcTransportCtxFactoryTls(std::move(verifier)));
 }
 
 } // namespace android

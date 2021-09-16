@@ -26,8 +26,10 @@
 
 #include <string_view>
 
+#include <android-base/hex.h>
 #include <android-base/macros.h>
 #include <android_runtime/vm.h>
+#include <binder/BpBinder.h>
 #include <binder/Parcel.h>
 #include <binder/RpcServer.h>
 #include <binder/RpcTransportRaw.h>
@@ -64,23 +66,12 @@ RpcSession::~RpcSession() {
 
 sp<RpcSession> RpcSession::make() {
     // Default is without TLS.
-    return make(RpcTransportCtxFactoryRaw::make(), std::nullopt, std::nullopt);
+    return make(RpcTransportCtxFactoryRaw::make());
 }
 
-sp<RpcSession> RpcSession::make(std::unique_ptr<RpcTransportCtxFactory> rpcTransportCtxFactory,
-                                std::optional<CertificateFormat> serverCertificateFormat,
-                                std::optional<std::string> serverCertificate) {
+sp<RpcSession> RpcSession::make(std::unique_ptr<RpcTransportCtxFactory> rpcTransportCtxFactory) {
     auto ctx = rpcTransportCtxFactory->newClientCtx();
     if (ctx == nullptr) return nullptr;
-    LOG_ALWAYS_FATAL_IF(serverCertificateFormat.has_value() != serverCertificate.has_value());
-    if (serverCertificateFormat.has_value() && serverCertificate.has_value()) {
-        status_t status =
-                ctx->addTrustedPeerCertificate(*serverCertificateFormat, *serverCertificate);
-        if (status != OK) {
-            ALOGE("Cannot add trusted server certificate: %s", statusToString(status).c_str());
-            return nullptr;
-        }
-    }
     return sp<RpcSession>::make(std::move(ctx));
 }
 
@@ -143,7 +134,7 @@ status_t RpcSession::setupInetClient(const char* addr, unsigned int port) {
 }
 
 status_t RpcSession::setupPreconnectedClient(unique_fd fd, std::function<unique_fd()>&& request) {
-    return setupClient([&](const RpcAddress& sessionId, bool incoming) -> status_t {
+    return setupClient([&](const std::vector<uint8_t>& sessionId, bool incoming) -> status_t {
         // std::move'd from fd becomes -1 (!ok())
         if (!fd.ok()) {
             fd = request();
@@ -201,7 +192,7 @@ bool RpcSession::shutdownAndWait(bool wait) {
 
     if (wait) {
         LOG_ALWAYS_FATAL_IF(mShutdownListener == nullptr, "Shutdown listener not installed");
-        mShutdownListener->waitForShutdown(_l);
+        mShutdownListener->waitForShutdown(_l, sp<RpcSession>::fromExisting(this));
 
         LOG_ALWAYS_FATAL_IF(!mThreads.empty(), "Shutdown failed");
     }
@@ -225,7 +216,11 @@ status_t RpcSession::transact(const sp<IBinder>& binder, uint32_t code, const Pa
                              sp<RpcSession>::fromExisting(this), reply, flags);
 }
 
-status_t RpcSession::sendDecStrong(const RpcAddress& address) {
+status_t RpcSession::sendDecStrong(const BpBinder* binder) {
+    return sendDecStrong(binder->getPrivateAccessor().rpcAddress());
+}
+
+status_t RpcSession::sendDecStrong(uint64_t address) {
     ExclusiveConnection connection;
     status_t status = ExclusiveConnection::find(sp<RpcSession>::fromExisting(this),
                                                 ConnectionUse::CLIENT_REFCOUNT, &connection);
@@ -244,29 +239,30 @@ status_t RpcSession::readId() {
                                                 ConnectionUse::CLIENT, &connection);
     if (status != OK) return status;
 
-    mId = RpcAddress::zero();
-    status = state()->getSessionId(connection.get(), sp<RpcSession>::fromExisting(this),
-                                   &mId.value());
+    status = state()->getSessionId(connection.get(), sp<RpcSession>::fromExisting(this), &mId);
     if (status != OK) return status;
 
-    LOG_RPC_DETAIL("RpcSession %p has id %s", this, mId->toString().c_str());
+    LOG_RPC_DETAIL("RpcSession %p has id %s", this,
+                   base::HexString(mId.data(), mId.size()).c_str());
     return OK;
 }
 
 void RpcSession::WaitForShutdownListener::onSessionAllIncomingThreadsEnded(
         const sp<RpcSession>& session) {
     (void)session;
-    mShutdown = true;
 }
 
 void RpcSession::WaitForShutdownListener::onSessionIncomingThreadEnded() {
     mCv.notify_all();
 }
 
-void RpcSession::WaitForShutdownListener::waitForShutdown(std::unique_lock<std::mutex>& lock) {
-    while (!mShutdown) {
+void RpcSession::WaitForShutdownListener::waitForShutdown(std::unique_lock<std::mutex>& lock,
+                                                          const sp<RpcSession>& session) {
+    while (session->mIncomingConnections.size() > 0) {
         if (std::cv_status::timeout == mCv.wait_for(lock, std::chrono::seconds(1))) {
-            ALOGE("Waiting for RpcSession to shut down (1s w/o progress).");
+            ALOGE("Waiting for RpcSession to shut down (1s w/o progress): %zu incoming connections "
+                  "still.",
+                  session->mIncomingConnections.size());
         }
     }
 }
@@ -408,8 +404,8 @@ sp<RpcServer> RpcSession::server() {
     return server;
 }
 
-status_t RpcSession::setupClient(
-        const std::function<status_t(const RpcAddress& sessionId, bool incoming)>& connectAndInit) {
+status_t RpcSession::setupClient(const std::function<status_t(const std::vector<uint8_t>& sessionId,
+                                                              bool incoming)>& connectAndInit) {
     {
         std::lock_guard<std::mutex> _l(mMutex);
         LOG_ALWAYS_FATAL_IF(mOutgoingConnections.size() != 0,
@@ -418,8 +414,7 @@ status_t RpcSession::setupClient(
     }
     if (auto status = initShutdownTrigger(); status != OK) return status;
 
-    if (status_t status = connectAndInit(RpcAddress::zero(), false /*incoming*/); status != OK)
-        return status;
+    if (status_t status = connectAndInit({}, false /*incoming*/); status != OK) return status;
 
     {
         ExclusiveConnection connection;
@@ -460,26 +455,25 @@ status_t RpcSession::setupClient(
 
     // we've already setup one client
     for (size_t i = 0; i + 1 < numThreadsAvailable; i++) {
-        if (status_t status = connectAndInit(mId.value(), false /*incoming*/); status != OK)
-            return status;
+        if (status_t status = connectAndInit(mId, false /*incoming*/); status != OK) return status;
     }
 
     for (size_t i = 0; i < mMaxThreads; i++) {
-        if (status_t status = connectAndInit(mId.value(), true /*incoming*/); status != OK)
-            return status;
+        if (status_t status = connectAndInit(mId, true /*incoming*/); status != OK) return status;
     }
 
     return OK;
 }
 
 status_t RpcSession::setupSocketClient(const RpcSocketAddress& addr) {
-    return setupClient([&](const RpcAddress& sessionId, bool incoming) {
+    return setupClient([&](const std::vector<uint8_t>& sessionId, bool incoming) {
         return setupOneSocketConnection(addr, sessionId, incoming);
     });
 }
 
 status_t RpcSession::setupOneSocketConnection(const RpcSocketAddress& addr,
-                                              const RpcAddress& sessionId, bool incoming) {
+                                              const std::vector<uint8_t>& sessionId,
+                                              bool incoming) {
     for (size_t tries = 0; tries < 5; tries++) {
         if (tries > 0) usleep(10000);
 
@@ -537,7 +531,7 @@ status_t RpcSession::setupOneSocketConnection(const RpcSocketAddress& addr,
     return UNKNOWN_ERROR;
 }
 
-status_t RpcSession::initAndAddConnection(unique_fd fd, const RpcAddress& sessionId,
+status_t RpcSession::initAndAddConnection(unique_fd fd, const std::vector<uint8_t>& sessionId,
                                           bool incoming) {
     LOG_ALWAYS_FATAL_IF(mShutdownTrigger == nullptr);
     auto server = mCtx->newTransport(std::move(fd), mShutdownTrigger.get());
@@ -548,13 +542,20 @@ status_t RpcSession::initAndAddConnection(unique_fd fd, const RpcAddress& sessio
 
     LOG_RPC_DETAIL("Socket at client with RpcTransport %p", server.get());
 
+    if (sessionId.size() > std::numeric_limits<uint16_t>::max()) {
+        ALOGE("Session ID too big %zu", sessionId.size());
+        return BAD_VALUE;
+    }
+
     RpcConnectionHeader header{
             .version = mProtocolVersion.value_or(RPC_WIRE_PROTOCOL_VERSION),
             .options = 0,
+            .sessionIdSize = static_cast<uint16_t>(sessionId.size()),
     };
-    memcpy(&header.sessionId, &sessionId.viewRawEmbedded(), sizeof(RpcWireAddress));
 
-    if (incoming) header.options |= RPC_CONNECTION_OPTION_INCOMING;
+    if (incoming) {
+        header.options |= RPC_CONNECTION_OPTION_INCOMING;
+    }
 
     auto sendHeaderStatus =
             server->interruptableWriteFully(mShutdownTrigger.get(), &header, sizeof(header));
@@ -562,6 +563,18 @@ status_t RpcSession::initAndAddConnection(unique_fd fd, const RpcAddress& sessio
         ALOGE("Could not write connection header to socket: %s",
               statusToString(sendHeaderStatus).c_str());
         return sendHeaderStatus;
+    }
+
+    if (sessionId.size() > 0) {
+        auto sendSessionIdStatus =
+                server->interruptableWriteFully(mShutdownTrigger.get(), sessionId.data(),
+                                                sessionId.size());
+        if (sendSessionIdStatus != OK) {
+            ALOGE("Could not write session ID ('%s') to socket: %s",
+                  base::HexString(sessionId.data(), sessionId.size()).c_str(),
+                  statusToString(sendSessionIdStatus).c_str());
+            return sendSessionIdStatus;
+        }
     }
 
     LOG_RPC_DETAIL("Socket at client: header sent");
@@ -636,7 +649,7 @@ status_t RpcSession::addOutgoingConnection(std::unique_ptr<RpcTransport> rpcTran
 }
 
 bool RpcSession::setForServer(const wp<RpcServer>& server, const wp<EventListener>& eventListener,
-                              const RpcAddress& sessionId) {
+                              const std::vector<uint8_t>& sessionId) {
     LOG_ALWAYS_FATAL_IF(mForServer != nullptr);
     LOG_ALWAYS_FATAL_IF(server == nullptr);
     LOG_ALWAYS_FATAL_IF(mEventListener != nullptr);
@@ -697,7 +710,7 @@ bool RpcSession::removeIncomingConnection(const sp<RpcConnection>& connection) {
     return false;
 }
 
-std::string RpcSession::getCertificate(CertificateFormat format) {
+std::vector<uint8_t> RpcSession::getCertificate(RpcCertificateFormat format) {
     return mCtx->getCertificate(format);
 }
 

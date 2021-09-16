@@ -25,14 +25,11 @@
 #include <android-base/unique_fd.h>
 #include <utils/Errors.h>
 
+#include <binder/RpcCertificateFormat.h>
+
 namespace android {
 
 class FdTrigger;
-
-enum class CertificateFormat {
-    PEM,
-    // TODO(b/195166979): support other formats, e.g. DER
-};
 
 // Represents a socket connection.
 // No thread-safety is guaranteed for these APIs.
@@ -41,7 +38,7 @@ public:
     virtual ~RpcTransport() = default;
 
     // replacement of ::recv(MSG_PEEK). Error code may not be set if TLS is enabled.
-    virtual android::base::Result<size_t> peek(void *buf, size_t size) = 0;
+    [[nodiscard]] virtual android::base::Result<size_t> peek(void *buf, size_t size) = 0;
 
     /**
      * Read (or write), but allow to be interrupted by a trigger.
@@ -50,9 +47,10 @@ public:
      *   OK - succeeded in completely processing 'size'
      *   error - interrupted (failure or trigger)
      */
-    virtual status_t interruptableWriteFully(FdTrigger *fdTrigger, const void *buf,
-                                             size_t size) = 0;
-    virtual status_t interruptableReadFully(FdTrigger *fdTrigger, void *buf, size_t size) = 0;
+    [[nodiscard]] virtual status_t interruptableWriteFully(FdTrigger *fdTrigger, const void *buf,
+                                                           size_t size) = 0;
+    [[nodiscard]] virtual status_t interruptableReadFully(FdTrigger *fdTrigger, void *buf,
+                                                          size_t size) = 0;
 
 protected:
     RpcTransport() = default;
@@ -76,19 +74,8 @@ public:
     // Implementation details:
     // - For raw sockets, this always returns empty string.
     // - For TLS, this returns the certificate. See RpcTransportTls for details.
-    [[nodiscard]] virtual std::string getCertificate(CertificateFormat format) const = 0;
-
-    // Add a trusted peer certificate. Peers presenting this certificate are accepted.
-    //
-    // Caller must ensure that newTransport() are called after all trusted peer certificates
-    // are added. Otherwise, RpcTransport-s created before may not trust peer certificates
-    // added later.
-    //
-    // Implementation details:
-    // - For raw sockets, this always returns OK.
-    // - For TLS, this adds trusted peer certificate. See RpcTransportTls for details.
-    [[nodiscard]] virtual status_t addTrustedPeerCertificate(CertificateFormat format,
-                                                             std::string_view cert) = 0;
+    [[nodiscard]] virtual std::vector<uint8_t> getCertificate(
+            RpcCertificateFormat format) const = 0;
 
 protected:
     RpcTransportCtx() = default;

@@ -120,9 +120,12 @@ aidl_interface {
     host_supported: true,
     unstable: true,
     srcs: [
+        "BinderRpcTestClientInfo.aidl",
+        "BinderRpcTestServerInfo.aidl",
         "IBinderRpcCallback.aidl",
         "IBinderRpcSession.aidl",
         "IBinderRpcTest.aidl",
+        "ParcelableCertificateData.aidl",
     ],
     backend: {
         java: {
@@ -150,6 +153,7 @@ cc_test {
 
     srcs: [
         "binderRpcTest.cpp",
+        "RpcCertificateVerifierSimple.cpp",
     ],
     shared_libs: [
         "libbinder",
