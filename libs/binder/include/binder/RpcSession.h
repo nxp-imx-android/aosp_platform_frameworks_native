@@ -17,7 +17,6 @@
 
 #include <android-base/unique_fd.h>
 #include <binder/IBinder.h>
-#include <binder/RpcAddress.h>
 #include <binder/RpcTransport.h>
 #include <utils/Errors.h>
 #include <utils/RefBase.h>
@@ -54,7 +53,7 @@ public:
     // Create an RpcSession with default configuration (raw sockets).
     static sp<RpcSession> make();
 
-    // Create an RpcSession with the given configuration. |serverCertificateFormat| and
+    // Create an RpcSession with the given configuration. |serverRpcCertificateFormat| and
     // |serverCertificate| must have values or be nullopt simultaneously. If they have values, set
     // server certificate.
     static sp<RpcSession> make(std::unique_ptr<RpcTransportCtxFactory> rpcTransportCtxFactory);
@@ -132,7 +131,7 @@ public:
     /**
      * See RpcTransportCtx::getCertificate
      */
-    std::string getCertificate(CertificateFormat);
+    std::vector<uint8_t> getCertificate(RpcCertificateFormat);
 
     /**
      * Shuts down the service.
@@ -152,7 +151,13 @@ public:
 
     [[nodiscard]] status_t transact(const sp<IBinder>& binder, uint32_t code, const Parcel& data,
                                     Parcel* reply, uint32_t flags);
-    [[nodiscard]] status_t sendDecStrong(const RpcAddress& address);
+
+    /**
+     * Generally, you should not call this, unless you are testing error
+     * conditions, as this is called automatically by BpBinders when they are
+     * deleted (this is also why a raw pointer is used here)
+     */
+    [[nodiscard]] status_t sendDecStrong(const BpBinder* binder);
 
     ~RpcSession();
 
@@ -171,6 +176,8 @@ private:
     friend RpcState;
     explicit RpcSession(std::unique_ptr<RpcTransportCtx> ctx);
 
+    [[nodiscard]] status_t sendDecStrong(uint64_t address);
+
     class EventListener : public virtual RefBase {
     public:
         virtual void onSessionAllIncomingThreadsEnded(const sp<RpcSession>& session) = 0;
@@ -181,12 +188,12 @@ private:
     public:
         void onSessionAllIncomingThreadsEnded(const sp<RpcSession>& session) override;
         void onSessionIncomingThreadEnded() override;
-        void waitForShutdown(std::unique_lock<std::mutex>& lock);
+        void waitForShutdown(std::unique_lock<std::mutex>& lock, const sp<RpcSession>& session);
 
     private:
         std::condition_variable mCv;
-        volatile bool mShutdown = false;
     };
+    friend WaitForShutdownListener;
 
     struct RpcConnection : public RefBase {
         std::unique_ptr<RpcTransport> rpcTransport;
@@ -220,19 +227,21 @@ private:
     static void join(sp<RpcSession>&& session, PreJoinSetupResult&& result);
 
     [[nodiscard]] status_t setupClient(
-            const std::function<status_t(const RpcAddress& sessionId, bool incoming)>&
+            const std::function<status_t(const std::vector<uint8_t>& sessionId, bool incoming)>&
                     connectAndInit);
     [[nodiscard]] status_t setupSocketClient(const RpcSocketAddress& address);
     [[nodiscard]] status_t setupOneSocketConnection(const RpcSocketAddress& address,
-                                                    const RpcAddress& sessionId, bool incoming);
-    [[nodiscard]] status_t initAndAddConnection(base::unique_fd fd, const RpcAddress& sessionId,
+                                                    const std::vector<uint8_t>& sessionId,
+                                                    bool incoming);
+    [[nodiscard]] status_t initAndAddConnection(base::unique_fd fd,
+                                                const std::vector<uint8_t>& sessionId,
                                                 bool incoming);
     [[nodiscard]] status_t addIncomingConnection(std::unique_ptr<RpcTransport> rpcTransport);
     [[nodiscard]] status_t addOutgoingConnection(std::unique_ptr<RpcTransport> rpcTransport,
                                                  bool init);
     [[nodiscard]] bool setForServer(const wp<RpcServer>& server,
                                     const wp<RpcSession::EventListener>& eventListener,
-                                    const RpcAddress& sessionId);
+                                    const std::vector<uint8_t>& sessionId);
     sp<RpcConnection> assignIncomingConnectionToThisThread(
             std::unique_ptr<RpcTransport> rpcTransport);
     [[nodiscard]] bool removeIncomingConnection(const sp<RpcConnection>& connection);
@@ -289,7 +298,7 @@ private:
     sp<WaitForShutdownListener> mShutdownListener; // used for client sessions
     wp<EventListener> mEventListener; // mForServer if server, mShutdownListener if client
 
-    std::optional<RpcAddress> mId;
+    std::vector<uint8_t> mId;
 
     std::unique_ptr<FdTrigger> mShutdownTrigger;
 
