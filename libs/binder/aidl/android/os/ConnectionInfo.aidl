@@ -14,21 +14,20 @@
  * limitations under the License.
  */
 
-// Utilities for serializing and deserializing X509 certificates.
+package android.os;
 
-#pragma once
+/**
+ * Remote connection info associated with a declared service
+ * @hide
+ */
+parcelable ConnectionInfo {
+    /**
+     * IP address that the service is listening on.
+     */
+    @utf8InCpp String ipAddress;
+    /**
+     * Port number that the service is listening on. Actual value is an unsigned integer.
+     */
+    int port;
+}
 
-#include <vector>
-
-#include <openssl/ssl.h>
-
-#include <binder/RpcCertificateFormat.h>
-
-namespace android {
-
-bssl::UniquePtr<X509> deserializeCertificate(const std::vector<uint8_t>& cert,
-                                             RpcCertificateFormat format);
-
-std::vector<uint8_t> serializeCertificate(X509* x509, RpcCertificateFormat format);
-
-} // namespace android
