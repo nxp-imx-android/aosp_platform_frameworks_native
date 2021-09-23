@@ -14,19 +14,28 @@
  * limitations under the License.
  */
 
+// Formats for serializing TLS private keys.
+
 #pragma once
 
-#include <openssl/ssl.h>
-#include <utils/Errors.h>
+#include <string>
 
 namespace android {
 
-// An interface with a function that verifies a peer certificate. It is a wrapper over the custom
-// verify function (see SSL_CTX_set_custom_verify).
-class RpcCertificateVerifier {
-public:
-    virtual ~RpcCertificateVerifier() = default;
-    virtual status_t verify(const X509* peerCert, uint8_t* outAlert) = 0;
+enum class RpcKeyFormat {
+    PEM,
+    DER,
 };
+
+static inline std::string PrintToString(RpcKeyFormat format) {
+    switch (format) {
+        case RpcKeyFormat::PEM:
+            return "PEM";
+        case RpcKeyFormat::DER:
+            return "DER";
+        default:
+            return "<unknown>";
+    }
+}
 
 } // namespace android

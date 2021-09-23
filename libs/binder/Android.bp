@@ -256,13 +256,16 @@ cc_defaults {
     export_header_lib_headers: [
         "libbinder_headers",
     ],
+    export_shared_lib_headers: [
+        "libssl",
+    ],
     export_include_dirs: ["include_tls"],
     static_libs: [
         "libbase",
     ],
     srcs: [
         "RpcTransportTls.cpp",
-        "RpcCertificateUtils.cpp",
+        "RpcTlsUtils.cpp",
     ],
 }
 
@@ -284,6 +287,7 @@ cc_library_static {
 filegroup {
     name: "libbinder_aidl",
     srcs: [
+        "aidl/android/os/ConnectionInfo.aidl",
         "aidl/android/os/IClientCallback.aidl",
         "aidl/android/os/IServiceCallback.aidl",
         "aidl/android/os/IServiceManager.aidl",
