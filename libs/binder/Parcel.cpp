@@ -233,7 +233,7 @@ status_t Parcel::flattenBinder(const sp<IBinder>& binder) {
                 ALOGE("null proxy");
             } else {
                 if (proxy->isRpcBinder()) {
-                    ALOGE("Sending a socket binder over RPC is prohibited");
+                    ALOGE("Sending a socket binder over kernel binder is prohibited");
                     return INVALID_OPERATION;
                 }
             }
@@ -289,6 +289,9 @@ status_t Parcel::unflattenBinder(sp<IBinder>* out) const
             uint64_t addr;
             if (status_t status = readUint64(&addr); status != OK) return status;
             if (status_t status = mSession->state()->onBinderEntering(mSession, addr, &binder);
+                status != OK)
+                return status;
+            if (status_t status = mSession->state()->flushExcessBinderRefs(mSession, addr, binder);
                 status != OK)
                 return status;
         }
