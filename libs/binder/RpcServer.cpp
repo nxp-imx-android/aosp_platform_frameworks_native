@@ -16,6 +16,7 @@
 
 #define LOG_TAG "RpcServer"
 
+#include <inttypes.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -37,6 +38,8 @@
 #include "RpcWireFormat.h"
 
 namespace android {
+
+constexpr size_t kSessionIdBytes = 32;
 
 using base::ScopeGuard;
 using base::unique_fd;
@@ -205,8 +208,11 @@ bool RpcServer::shutdown() {
     }
 
     mShutdownTrigger->trigger();
+
     for (auto& [id, session] : mSessions) {
         (void)id;
+        // server lock is a more general lock
+        std::lock_guard<std::mutex> _lSession(session->mMutex);
         session->mShutdownTrigger->trigger();
     }
 
@@ -275,7 +281,7 @@ void RpcServer::establishConnection(sp<RpcServer>&& server, base::unique_fd clie
     RpcConnectionHeader header;
     if (status == OK) {
         status = client->interruptableReadFully(server->mShutdownTrigger.get(), &header,
-                                                sizeof(header));
+                                                sizeof(header), {});
         if (status != OK) {
             ALOGE("Failed to read ID for client connecting to RPC server: %s",
                   statusToString(status).c_str());
@@ -286,13 +292,19 @@ void RpcServer::establishConnection(sp<RpcServer>&& server, base::unique_fd clie
     std::vector<uint8_t> sessionId;
     if (status == OK) {
         if (header.sessionIdSize > 0) {
-            sessionId.resize(header.sessionIdSize);
-            status = client->interruptableReadFully(server->mShutdownTrigger.get(),
-                                                    sessionId.data(), sessionId.size());
-            if (status != OK) {
-                ALOGE("Failed to read session ID for client connecting to RPC server: %s",
-                      statusToString(status).c_str());
-                // still need to cleanup before we can return
+            if (header.sessionIdSize == kSessionIdBytes) {
+                sessionId.resize(header.sessionIdSize);
+                status = client->interruptableReadFully(server->mShutdownTrigger.get(),
+                                                        sessionId.data(), sessionId.size(), {});
+                if (status != OK) {
+                    ALOGE("Failed to read session ID for client connecting to RPC server: %s",
+                          statusToString(status).c_str());
+                    // still need to cleanup before we can return
+                }
+            } else {
+                ALOGE("Malformed session ID. Expecting session ID of size %zu but got %" PRIu16,
+                      kSessionIdBytes, header.sessionIdSize);
+                status = BAD_VALUE;
             }
         }
     }
@@ -313,7 +325,7 @@ void RpcServer::establishConnection(sp<RpcServer>&& server, base::unique_fd clie
             };
 
             status = client->interruptableWriteFully(server->mShutdownTrigger.get(), &response,
-                                                     sizeof(response));
+                                                     sizeof(response), {});
             if (status != OK) {
                 ALOGE("Failed to send new session response: %s", statusToString(status).c_str());
                 // still need to cleanup before we can return
@@ -350,8 +362,7 @@ void RpcServer::establishConnection(sp<RpcServer>&& server, base::unique_fd clie
             // Uniquely identify session at the application layer. Even if a
             // client/server use the same certificates, if they create multiple
             // sessions, we still want to distinguish between them.
-            constexpr size_t kSessionIdSize = 32;
-            sessionId.resize(kSessionIdSize);
+            sessionId.resize(kSessionIdBytes);
             size_t tries = 0;
             do {
                 // don't block if there is some entropy issue
