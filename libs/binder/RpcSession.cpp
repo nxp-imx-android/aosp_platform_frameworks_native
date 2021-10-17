@@ -76,18 +76,32 @@ sp<RpcSession> RpcSession::make(std::unique_ptr<RpcTransportCtxFactory> rpcTrans
     return sp<RpcSession>::make(std::move(ctx));
 }
 
-void RpcSession::setMaxThreads(size_t threads) {
+void RpcSession::setMaxIncomingThreads(size_t threads) {
     std::lock_guard<std::mutex> _l(mMutex);
     LOG_ALWAYS_FATAL_IF(!mConnections.mOutgoing.empty() || !mConnections.mIncoming.empty(),
-                        "Must set max threads before setting up connections, but has %zu client(s) "
-                        "and %zu server(s)",
+                        "Must set max incoming threads before setting up connections, but has %zu "
+                        "client(s) and %zu server(s)",
                         mConnections.mOutgoing.size(), mConnections.mIncoming.size());
-    mMaxThreads = threads;
+    mMaxIncomingThreads = threads;
 }
 
-size_t RpcSession::getMaxThreads() {
+size_t RpcSession::getMaxIncomingThreads() {
     std::lock_guard<std::mutex> _l(mMutex);
-    return mMaxThreads;
+    return mMaxIncomingThreads;
+}
+
+void RpcSession::setMaxOutgoingThreads(size_t threads) {
+    std::lock_guard<std::mutex> _l(mMutex);
+    LOG_ALWAYS_FATAL_IF(!mConnections.mOutgoing.empty() || !mConnections.mIncoming.empty(),
+                        "Must set max outgoing threads before setting up connections, but has %zu "
+                        "client(s) and %zu server(s)",
+                        mConnections.mOutgoing.size(), mConnections.mIncoming.size());
+    mMaxOutgoingThreads = threads;
+}
+
+size_t RpcSession::getMaxOutgoingThreads() {
+    std::lock_guard<std::mutex> _l(mMutex);
+    return mMaxOutgoingThreads;
 }
 
 bool RpcSession::setProtocolVersion(uint32_t version) {
@@ -473,6 +487,12 @@ status_t RpcSession::setupClient(const std::function<status_t(const std::vector<
         return status;
     }
 
+    size_t outgoingThreads = std::min(numThreadsAvailable, mMaxOutgoingThreads);
+    ALOGI_IF(outgoingThreads != numThreadsAvailable,
+             "Server hints client to start %zu outgoing threads, but client will only start %zu "
+             "because it is preconfigured to start at most %zu outgoing threads.",
+             numThreadsAvailable, outgoingThreads, mMaxOutgoingThreads);
+
     // TODO(b/189955605): we should add additional sessions dynamically
     // instead of all at once - the other side should be responsible for setting
     // up additional connections. We need to create at least one (unless 0 are
@@ -480,11 +500,14 @@ status_t RpcSession::setupClient(const std::function<status_t(const std::vector<
     // any requests at all.
 
     // we've already setup one client
-    for (size_t i = 0; i + 1 < numThreadsAvailable; i++) {
+    LOG_RPC_DETAIL("RpcSession::setupClient() instantiating %zu outgoing (server max: %zu) and %zu "
+                   "incoming threads",
+                   outgoingThreads, numThreadsAvailable, mMaxIncomingThreads);
+    for (size_t i = 0; i + 1 < outgoingThreads; i++) {
         if (status_t status = connectAndInit(mId, false /*incoming*/); status != OK) return status;
     }
 
-    for (size_t i = 0; i < mMaxThreads; i++) {
+    for (size_t i = 0; i < mMaxIncomingThreads; i++) {
         if (status_t status = connectAndInit(mId, true /*incoming*/); status != OK) return status;
     }
 
@@ -697,9 +720,9 @@ sp<RpcSession::RpcConnection> RpcSession::assignIncomingConnectionToThisThread(
         std::unique_ptr<RpcTransport> rpcTransport) {
     std::lock_guard<std::mutex> _l(mMutex);
 
-    if (mConnections.mIncoming.size() >= mMaxThreads) {
+    if (mConnections.mIncoming.size() >= mMaxIncomingThreads) {
         ALOGE("Cannot add thread to session with %zu threads (max is set to %zu)",
-              mConnections.mIncoming.size(), mMaxThreads);
+              mConnections.mIncoming.size(), mMaxIncomingThreads);
         return nullptr;
     }
 

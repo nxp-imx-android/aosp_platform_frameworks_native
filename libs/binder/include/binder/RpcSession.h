@@ -50,6 +50,8 @@ constexpr uint32_t RPC_WIRE_PROTOCOL_VERSION = RPC_WIRE_PROTOCOL_VERSION_EXPERIM
  */
 class RpcSession final : public virtual RefBase {
 public:
+    static constexpr size_t kDefaultMaxOutgoingThreads = 10;
+
     // Create an RpcSession with default configuration (raw sockets).
     static sp<RpcSession> make();
 
@@ -59,7 +61,7 @@ public:
     static sp<RpcSession> make(std::unique_ptr<RpcTransportCtxFactory> rpcTransportCtxFactory);
 
     /**
-     * Set the maximum number of threads allowed to be made (for things like callbacks).
+     * Set the maximum number of incoming threads allowed to be made (for things like callbacks).
      * By default, this is 0. This must be called before setting up this connection as a client.
      * Server sessions will inherits this value from RpcServer.
      *
@@ -68,8 +70,20 @@ public:
      *
      * TODO(b/189955605): start these dynamically
      */
-    void setMaxThreads(size_t threads);
-    size_t getMaxThreads();
+    void setMaxIncomingThreads(size_t threads);
+    size_t getMaxIncomingThreads();
+
+    /**
+     * Set the maximum number of outgoing threads allowed to be made.
+     * By default, this is |kDefaultMaxOutgoingThreads|. This must be called before setting up this
+     * connection as a client.
+     *
+     * This limits the number of outgoing threads on top of the remote peer setting. This RpcSession
+     * will only instantiate |min(maxOutgoingThreads, remoteMaxThreads)| outgoing threads, where
+     * |remoteMaxThreads| can be retrieved from the remote peer via |getRemoteMaxThreads()|.
+     */
+    void setMaxOutgoingThreads(size_t threads);
+    size_t getMaxOutgoingThreads();
 
     /**
      * By default, the minimum of the supported versions of the client and the
@@ -307,7 +321,8 @@ private:
 
     std::mutex mMutex; // for all below
 
-    size_t mMaxThreads = 0;
+    size_t mMaxIncomingThreads = 0;
+    size_t mMaxOutgoingThreads = kDefaultMaxOutgoingThreads;
     std::optional<uint32_t> mProtocolVersion;
 
     std::condition_variable mAvailableConnectionCv; // for mWaitingThreads
