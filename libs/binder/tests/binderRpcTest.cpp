@@ -481,6 +481,7 @@ public:
         size_t numThreads = 1;
         size_t numSessions = 1;
         size_t numIncomingConnections = 0;
+        size_t numOutgoingConnections = SIZE_MAX;
     };
 
     static inline std::string PrintParamInfo(const testing::TestParamInfo<ParamType>& info) {
@@ -613,7 +614,8 @@ public:
         status_t status;
 
         for (const auto& session : sessions) {
-            session->setMaxThreads(options.numIncomingConnections);
+            session->setMaxIncomingThreads(options.numIncomingConnections);
+            session->setMaxOutgoingThreads(options.numOutgoingConnections);
 
             switch (socketType) {
                 case SocketType::PRECONNECTED:
@@ -655,6 +657,9 @@ public:
 
         return ret;
     }
+
+    void testThreadPoolOverSaturated(sp<IBinderRpcTest> iface, size_t numCalls,
+                                     size_t sleepMs = 500);
 };
 
 TEST_P(BinderRpc, Ping) {
@@ -685,13 +690,21 @@ TEST_P(BinderRpc, TransactionsMustBeMarkedRpc) {
 }
 
 TEST_P(BinderRpc, AppendSeparateFormats) {
-    auto proc = createRpcTestSocketServerProcess({});
+    auto proc1 = createRpcTestSocketServerProcess({});
+    auto proc2 = createRpcTestSocketServerProcess({});
+
+    Parcel pRaw;
 
     Parcel p1;
-    p1.markForBinder(proc.rootBinder);
+    p1.markForBinder(proc1.rootBinder);
     p1.writeInt32(3);
 
+    EXPECT_EQ(BAD_TYPE, p1.appendFrom(&pRaw, 0, p1.dataSize()));
+    EXPECT_EQ(BAD_TYPE, pRaw.appendFrom(&p1, 0, p1.dataSize()));
+
     Parcel p2;
+    p2.markForBinder(proc2.rootBinder);
+    p2.writeInt32(7);
 
     EXPECT_EQ(BAD_TYPE, p1.appendFrom(&p2, 0, p2.dataSize()));
     EXPECT_EQ(BAD_TYPE, p2.appendFrom(&p1, 0, p1.dataSize()));
@@ -996,28 +1009,39 @@ TEST_P(BinderRpc, ThreadPoolGreaterThanEqualRequested) {
     for (auto& t : ts) t.join();
 }
 
-TEST_P(BinderRpc, ThreadPoolOverSaturated) {
-    constexpr size_t kNumThreads = 10;
-    constexpr size_t kNumCalls = kNumThreads + 3;
-    constexpr size_t kSleepMs = 500;
-
-    auto proc = createRpcTestSocketServerProcess({.numThreads = kNumThreads});
-
+void BinderRpc::testThreadPoolOverSaturated(sp<IBinderRpcTest> iface, size_t numCalls,
+                                            size_t sleepMs) {
     size_t epochMsBefore = epochMillis();
 
     std::vector<std::thread> ts;
-    for (size_t i = 0; i < kNumCalls; i++) {
-        ts.push_back(std::thread([&] { proc.rootIface->sleepMs(kSleepMs); }));
+    for (size_t i = 0; i < numCalls; i++) {
+        ts.push_back(std::thread([&] { iface->sleepMs(sleepMs); }));
     }
 
     for (auto& t : ts) t.join();
 
     size_t epochMsAfter = epochMillis();
 
-    EXPECT_GE(epochMsAfter, epochMsBefore + 2 * kSleepMs);
+    EXPECT_GE(epochMsAfter, epochMsBefore + 2 * sleepMs);
 
     // Potential flake, but make sure calls are handled in parallel.
-    EXPECT_LE(epochMsAfter, epochMsBefore + 3 * kSleepMs);
+    EXPECT_LE(epochMsAfter, epochMsBefore + 3 * sleepMs);
+}
+
+TEST_P(BinderRpc, ThreadPoolOverSaturated) {
+    constexpr size_t kNumThreads = 10;
+    constexpr size_t kNumCalls = kNumThreads + 3;
+    auto proc = createRpcTestSocketServerProcess({.numThreads = kNumThreads});
+    testThreadPoolOverSaturated(proc.rootIface, kNumCalls);
+}
+
+TEST_P(BinderRpc, ThreadPoolLimitOutgoing) {
+    constexpr size_t kNumThreads = 20;
+    constexpr size_t kNumOutgoingConnections = 10;
+    constexpr size_t kNumCalls = kNumOutgoingConnections + 3;
+    auto proc = createRpcTestSocketServerProcess(
+            {.numThreads = kNumThreads, .numOutgoingConnections = kNumOutgoingConnections});
+    testThreadPoolOverSaturated(proc.rootIface, kNumCalls);
 }
 
 TEST_P(BinderRpc, ThreadingStressTest) {
