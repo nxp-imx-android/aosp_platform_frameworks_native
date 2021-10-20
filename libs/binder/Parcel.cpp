@@ -411,8 +411,9 @@ status_t Parcel::setData(const uint8_t* buffer, size_t len)
 
 status_t Parcel::appendFrom(const Parcel *parcel, size_t offset, size_t len)
 {
-    if (parcel->isForRpc() != isForRpc()) {
-        ALOGE("Cannot append Parcel of one format to another.");
+    if (mSession != parcel->mSession) {
+        ALOGE("Cannot append Parcel from one context to another. They may be different formats, "
+              "and objects are specific to a context.");
         return BAD_TYPE;
     }
 
@@ -545,6 +546,36 @@ bool Parcel::hasFileDescriptors() const
         scanForFds();
     }
     return mHasFds;
+}
+
+status_t Parcel::hasFileDescriptorsInRange(size_t offset, size_t len, bool& result) const {
+    if (len > INT32_MAX || offset > INT32_MAX) {
+        // Don't accept size_t values which may have come from an inadvertent conversion from a
+        // negative int.
+        return BAD_VALUE;
+    }
+    size_t limit = offset + len;
+    if (offset > mDataSize || len > mDataSize || limit > mDataSize || offset > limit) {
+        return BAD_VALUE;
+    }
+    result = hasFileDescriptorsInRangeUnchecked(offset, len);
+    return NO_ERROR;
+}
+
+bool Parcel::hasFileDescriptorsInRangeUnchecked(size_t offset, size_t len) const {
+    for (size_t i = 0; i < mObjectsSize; i++) {
+        size_t pos = mObjects[i];
+        if (pos < offset) continue;
+        if (pos + sizeof(flat_binder_object) > offset + len) {
+          if (mObjectsSorted) break;
+          else continue;
+        }
+        const flat_binder_object* flat = reinterpret_cast<const flat_binder_object*>(mData + pos);
+        if (flat->hdr.type == BINDER_TYPE_FD) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void Parcel::markSensitive() const
@@ -2539,16 +2570,7 @@ void Parcel::initState()
 
 void Parcel::scanForFds() const
 {
-    bool hasFds = false;
-    for (size_t i=0; i<mObjectsSize; i++) {
-        const flat_binder_object* flat
-            = reinterpret_cast<const flat_binder_object*>(mData + mObjects[i]);
-        if (flat->hdr.type == BINDER_TYPE_FD) {
-            hasFds = true;
-            break;
-        }
-    }
-    mHasFds = hasFds;
+    mHasFds = hasFileDescriptorsInRangeUnchecked(0, dataSize());
     mFdsKnown = true;
 }
 
