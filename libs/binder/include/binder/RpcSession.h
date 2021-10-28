@@ -26,10 +26,6 @@
 #include <thread>
 #include <vector>
 
-// WARNING: This is a feature which is still in development, and it is subject
-// to radical change. Any production use of this may subject your code to any
-// number of problems.
-
 namespace android {
 
 class Parcel;
@@ -140,7 +136,7 @@ public:
      * Query the other side of the session for the maximum number of threads
      * it supports (maximum number of concurrent non-nested synchronous transactions)
      */
-    status_t getRemoteMaxThreads(size_t* maxThreads);
+    [[nodiscard]] status_t getRemoteMaxThreads(size_t* maxThreads);
 
     /**
      * See RpcTransportCtx::getCertificate
@@ -220,7 +216,7 @@ private:
         bool allowNested = false;
     };
 
-    status_t readId();
+    [[nodiscard]] status_t readId();
 
     // A thread joining a server must always call these functions in order, and
     // cleanup is only programmed once into join. These are in separate
@@ -256,12 +252,13 @@ private:
                                                  bool init);
     [[nodiscard]] bool setForServer(const wp<RpcServer>& server,
                                     const wp<RpcSession::EventListener>& eventListener,
-                                    const std::vector<uint8_t>& sessionId);
+                                    const std::vector<uint8_t>& sessionId,
+                                    const sp<IBinder>& sessionSpecificRoot);
     sp<RpcConnection> assignIncomingConnectionToThisThread(
             std::unique_ptr<RpcTransport> rpcTransport);
     [[nodiscard]] bool removeIncomingConnection(const sp<RpcConnection>& connection);
 
-    status_t initShutdownTrigger();
+    [[nodiscard]] status_t initShutdownTrigger();
 
     enum class ConnectionUse {
         CLIENT,
@@ -272,8 +269,8 @@ private:
     // Object representing exclusive access to a connection.
     class ExclusiveConnection {
     public:
-        static status_t find(const sp<RpcSession>& session, ConnectionUse use,
-                             ExclusiveConnection* connection);
+        [[nodiscard]] static status_t find(const sp<RpcSession>& session, ConnectionUse use,
+                                           ExclusiveConnection* connection);
 
         ~ExclusiveConnection();
         const sp<RpcConnection>& get() { return mConnection; }
@@ -312,6 +309,10 @@ private:
     wp<RpcServer> mForServer; // maybe null, for client sessions
     sp<WaitForShutdownListener> mShutdownListener; // used for client sessions
     wp<EventListener> mEventListener; // mForServer if server, mShutdownListener if client
+
+    // session-specific root object (if a different root is used for each
+    // session)
+    sp<IBinder> mSessionSpecificRootObject;
 
     std::vector<uint8_t> mId;
 
