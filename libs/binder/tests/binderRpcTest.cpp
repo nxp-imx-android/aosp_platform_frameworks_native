@@ -109,7 +109,6 @@ TEST_P(BinderRpcSimple, SetExternalServerTest) {
     base::unique_fd sink(TEMP_FAILURE_RETRY(open("/dev/null", O_RDWR)));
     int sinkFd = sink.get();
     auto server = RpcServer::make(newFactory(GetParam()));
-    server->iUnderstandThisCodeIsExperimentalAndIWillNotUseItInProduction();
     ASSERT_FALSE(server->hasServer());
     ASSERT_EQ(OK, server->setupExternalServer(std::move(sink)));
     ASSERT_TRUE(server->hasServer());
@@ -174,6 +173,7 @@ public:
 class MyBinderRpcTest : public BnBinderRpcTest {
 public:
     wp<RpcServer> server;
+    int port = 0;
 
     Status sendString(const std::string& str) override {
         (void)str;
@@ -181,6 +181,10 @@ public:
     }
     Status doubleString(const std::string& str, std::string* strstr) override {
         *strstr = str + str;
+        return Status::ok();
+    }
+    Status getClientPort(int* out) override {
+        *out = port;
         return Status::ok();
     }
     Status countBinders(std::vector<int32_t>* out) override {
@@ -538,7 +542,6 @@ public:
                     auto certVerifier = std::make_shared<RpcCertificateVerifierSimple>();
                     sp<RpcServer> server = RpcServer::make(newFactory(rpcSecurity, certVerifier));
 
-                    server->iUnderstandThisCodeIsExperimentalAndIWillNotUseItInProduction();
                     server->setMaxThreads(options.numThreads);
 
                     unsigned int outPort = 0;
@@ -643,13 +646,41 @@ public:
 
     BinderRpcTestProcessSession createRpcTestSocketServerProcess(const Options& options) {
         BinderRpcTestProcessSession ret{
-                .proc = createRpcTestSocketServerProcess(options,
-                                                         [&](const sp<RpcServer>& server) {
-                                                             sp<MyBinderRpcTest> service =
-                                                                     new MyBinderRpcTest;
-                                                             server->setRootObject(service);
-                                                             service->server = server;
-                                                         }),
+                .proc = createRpcTestSocketServerProcess(
+                        options,
+                        [&](const sp<RpcServer>& server) {
+                            server->setPerSessionRootObject([&](const sockaddr* addr,
+                                                                socklen_t len) {
+                                sp<MyBinderRpcTest> service = sp<MyBinderRpcTest>::make();
+                                switch (addr->sa_family) {
+                                    case AF_UNIX:
+                                        // nothing to save
+                                        break;
+                                    case AF_VSOCK:
+                                        CHECK_EQ(len, sizeof(sockaddr_vm));
+                                        service->port = reinterpret_cast<const sockaddr_vm*>(addr)
+                                                                ->svm_port;
+                                        break;
+                                    case AF_INET:
+                                        CHECK_EQ(len, sizeof(sockaddr_in));
+                                        service->port =
+                                                ntohs(reinterpret_cast<const sockaddr_in*>(addr)
+                                                              ->sin_port);
+                                        break;
+                                    case AF_INET6:
+                                        CHECK_EQ(len, sizeof(sockaddr_in));
+                                        service->port =
+                                                ntohs(reinterpret_cast<const sockaddr_in6*>(addr)
+                                                              ->sin6_port);
+                                        break;
+                                    default:
+                                        LOG_ALWAYS_FATAL("Unrecognized address family %d",
+                                                         addr->sa_family);
+                                }
+                                service->server = server;
+                                return service;
+                            });
+                        }),
         };
 
         ret.rootBinder = ret.proc.sessions.at(0).root;
@@ -680,6 +711,27 @@ TEST_P(BinderRpc, MultipleSessions) {
         ASSERT_NE(nullptr, session.root);
         EXPECT_EQ(OK, session.root->pingBinder());
     }
+}
+
+TEST_P(BinderRpc, SeparateRootObject) {
+    SocketType type = std::get<0>(GetParam());
+    if (type == SocketType::PRECONNECTED || type == SocketType::UNIX) {
+        // we can't get port numbers for unix sockets
+        return;
+    }
+
+    auto proc = createRpcTestSocketServerProcess({.numSessions = 2});
+
+    int port1 = 0;
+    EXPECT_OK(proc.rootIface->getClientPort(&port1));
+
+    sp<IBinderRpcTest> rootIface2 = interface_cast<IBinderRpcTest>(proc.proc.sessions.at(1).root);
+    int port2;
+    EXPECT_OK(rootIface2->getClientPort(&port2));
+
+    // we should have a different IBinderRpcTest object created for each
+    // session, because we use setPerSessionRootObject
+    EXPECT_NE(port1, port2);
 }
 
 TEST_P(BinderRpc, TransactionsMustBeMarkedRpc) {
@@ -1251,11 +1303,20 @@ TEST_P(BinderRpc, Die) {
 }
 
 TEST_P(BinderRpc, UseKernelBinderCallingId) {
+    bool okToFork = ProcessState::selfOrNull() == nullptr;
+
     auto proc = createRpcTestSocketServerProcess({});
 
-    // we can't allocate IPCThreadState so actually the first time should
-    // succeed :(
-    EXPECT_OK(proc.rootIface->useKernelBinderCallingId());
+    // If this process has used ProcessState already, then the forked process
+    // cannot use it at all. If this process hasn't used it (depending on the
+    // order tests are run), then the forked process can use it, and we'll only
+    // catch the invalid usage the second time. Such is the burden of global
+    // state!
+    if (okToFork) {
+        // we can't allocate IPCThreadState so actually the first time should
+        // succeed :(
+        EXPECT_OK(proc.rootIface->useKernelBinderCallingId());
+    }
 
     // second time! we catch the error :)
     EXPECT_EQ(DEAD_OBJECT, proc.rootIface->useKernelBinderCallingId().transactionError());
@@ -1321,7 +1382,6 @@ static bool testSupportVsockLoopback() {
     // We don't need to enable TLS to know if vsock is supported.
     unsigned int vsockPort = allocateVsockPort();
     sp<RpcServer> server = RpcServer::make(RpcTransportCtxFactoryRaw::make());
-    server->iUnderstandThisCodeIsExperimentalAndIWillNotUseItInProduction();
     if (status_t status = server->setupVsockServer(vsockPort); status != OK) {
         if (status == -EAFNOSUPPORT) {
             return false;
@@ -1410,7 +1470,6 @@ private:
 TEST_P(BinderRpcSimple, Shutdown) {
     auto addr = allocateSocketAddress();
     auto server = RpcServer::make(newFactory(GetParam()));
-    server->iUnderstandThisCodeIsExperimentalAndIWillNotUseItInProduction();
     ASSERT_EQ(OK, server->setupUnixDomainServer(addr.c_str()));
     auto joinEnds = std::make_shared<OneOffSignal>();
 
@@ -1450,7 +1509,6 @@ TEST(BinderRpc, Java) {
     ASSERT_EQ(OK, binder->pingBinder());
 
     auto rpcServer = RpcServer::make();
-    rpcServer->iUnderstandThisCodeIsExperimentalAndIWillNotUseItInProduction();
     unsigned int port;
     ASSERT_EQ(OK, rpcServer->setupInetServer(kLocalInetAddress, 0, &port));
     auto socket = rpcServer->releaseServer();
@@ -1489,7 +1547,6 @@ public:
                 std::unique_ptr<RpcAuth> auth = std::make_unique<RpcAuthSelfSigned>()) {
             auto [socketType, rpcSecurity, certificateFormat] = param;
             auto rpcServer = RpcServer::make(newFactory(rpcSecurity));
-            rpcServer->iUnderstandThisCodeIsExperimentalAndIWillNotUseItInProduction();
             switch (socketType) {
                 case SocketType::PRECONNECTED: {
                     return AssertionFailure() << "Not supported by this test";
@@ -1951,5 +2008,6 @@ INSTANTIATE_TEST_CASE_P(
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     android::base::InitLogging(argv, android::base::StderrLogger, android::base::DefaultAborter);
+
     return RUN_ALL_TESTS();
 }
