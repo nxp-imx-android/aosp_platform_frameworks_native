@@ -521,6 +521,25 @@ int Parcel::compareData(const Parcel& other) {
     return memcmp(data(), other.data(), size);
 }
 
+status_t Parcel::compareDataInRange(size_t thisOffset, const Parcel& other, size_t otherOffset,
+                                    size_t len, int* result) const {
+    if (len > INT32_MAX || thisOffset > INT32_MAX || otherOffset > INT32_MAX) {
+        // Don't accept size_t values which may have come from an inadvertent conversion from a
+        // negative int.
+        return BAD_VALUE;
+    }
+    size_t thisLimit;
+    if (__builtin_add_overflow(thisOffset, len, &thisLimit) || thisLimit > mDataSize) {
+        return BAD_VALUE;
+    }
+    size_t otherLimit;
+    if (__builtin_add_overflow(otherOffset, len, &otherLimit) || otherLimit > other.mDataSize) {
+        return BAD_VALUE;
+    }
+    *result = memcmp(data() + thisOffset, other.data() + otherOffset, len);
+    return NO_ERROR;
+}
+
 bool Parcel::allowFds() const
 {
     return mAllowFds;
@@ -611,6 +630,8 @@ void Parcel::updateWorkSourceRequestHeaderPosition() const {
 
 #if defined(__ANDROID_VNDK__)
 constexpr int32_t kHeader = B_PACK_CHARS('V', 'N', 'D', 'R');
+#elif defined(__ANDROID_RECOVERY__)
+constexpr int32_t kHeader = B_PACK_CHARS('R', 'E', 'C', 'O');
 #else
 constexpr int32_t kHeader = B_PACK_CHARS('S', 'Y', 'S', 'T');
 #endif
