@@ -70,6 +70,7 @@ Surface::Surface(const sp<IGraphicBufferProducer>& bufferProducer, bool controll
         mGenerationNumber(0),
         mSharedBufferMode(false),
         mAutoRefresh(false),
+        mAutoPrerotation(false),
         mSharedBufferSlot(BufferItem::INVALID_BUFFER_SLOT),
         mSharedBufferHasBeenQueued(false),
         mQueriedSupportedTimestamps(false),
@@ -2619,6 +2620,16 @@ status_t Surface::setFrameRate(float frameRate, int8_t compatibility,
 
 status_t Surface::setFrameTimelineInfo(const FrameTimelineInfo& frameTimelineInfo) {
     return composerService()->setFrameTimelineInfo(mGraphicBufferProducer, frameTimelineInfo);
+}
+
+sp<IBinder> Surface::getSurfaceControlHandle() const {
+    Mutex::Autolock lock(mMutex);
+    return mSurfaceControlHandle;
+}
+
+void Surface::destroy() {
+    Mutex::Autolock lock(mMutex);
+    mSurfaceControlHandle = nullptr;
 }
 
 }; // namespace android
