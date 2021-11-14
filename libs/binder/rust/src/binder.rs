@@ -17,7 +17,7 @@
 //! Trait definitions for binder objects
 
 use crate::error::{status_t, Result, StatusCode};
-use crate::parcel::{OwnedParcel, Parcel};
+use crate::parcel::{Parcel, BorrowedParcel};
 use crate::proxy::{DeathRecipient, SpIBinder, WpIBinder};
 use crate::sys;
 
@@ -129,7 +129,7 @@ pub trait Remotable: Send + Sync {
     /// Handle and reply to a request to invoke a transaction on this object.
     ///
     /// `reply` may be [`None`] if the sender does not expect a reply.
-    fn on_transact(&self, code: TransactionCode, data: &Parcel, reply: &mut Parcel) -> Result<()>;
+    fn on_transact(&self, code: TransactionCode, data: &BorrowedParcel<'_>, reply: &mut BorrowedParcel<'_>) -> Result<()>;
 
     /// Handle a request to invoke the dump transaction on this
     /// object.
@@ -167,6 +167,7 @@ pub trait IBinderInternal: IBinder {
     fn ping_binder(&mut self) -> Result<()>;
 
     /// Indicate that the service intends to receive caller security contexts.
+    #[cfg(not(android_vndk))]
     fn set_requesting_sid(&mut self, enable: bool);
 
     /// Dump this object to the given file handle
@@ -177,25 +178,25 @@ pub trait IBinderInternal: IBinder {
     fn get_extension(&mut self) -> Result<Option<SpIBinder>>;
 
     /// Create a Parcel that can be used with `submit_transact`.
-    fn prepare_transact(&self) -> Result<OwnedParcel>;
+    fn prepare_transact(&self) -> Result<Parcel>;
 
     /// Perform a generic operation with the object.
     ///
-    /// The provided [`OwnedParcel`] must have been created by a call to
+    /// The provided [`Parcel`] must have been created by a call to
     /// `prepare_transact` on the same binder.
     ///
     /// # Arguments
     ///
     /// * `code` - Transaction code for the operation.
-    /// * `data` - [`OwnedParcel`] with input data.
+    /// * `data` - [`Parcel`] with input data.
     /// * `flags` - Transaction flags, e.g. marking the transaction as
     ///   asynchronous ([`FLAG_ONEWAY`](FLAG_ONEWAY)).
     fn submit_transact(
         &self,
         code: TransactionCode,
-        data: OwnedParcel,
+        data: Parcel,
         flags: TransactionFlags,
-    ) -> Result<OwnedParcel>;
+    ) -> Result<Parcel>;
 
     /// Perform a generic operation with the object. This is a convenience
     /// method that internally calls `prepare_transact` followed by
@@ -206,15 +207,15 @@ pub trait IBinderInternal: IBinder {
     /// * `flags` - Transaction flags, e.g. marking the transaction as
     ///   asynchronous ([`FLAG_ONEWAY`](FLAG_ONEWAY))
     /// * `input_callback` A callback for building the `Parcel`.
-    fn transact<F: FnOnce(&mut Parcel) -> Result<()>>(
+    fn transact<F: FnOnce(BorrowedParcel<'_>) -> Result<()>>(
         &self,
         code: TransactionCode,
         flags: TransactionFlags,
         input_callback: F,
     ) -> Result<Parcel> {
         let mut parcel = self.prepare_transact()?;
-        input_callback(&mut parcel.borrowed())?;
-        self.submit_transact(code, parcel, flags).map(OwnedParcel::into_parcel)
+        input_callback(parcel.borrowed())?;
+        self.submit_transact(code, parcel, flags)
     }
 }
 
@@ -475,8 +476,8 @@ impl<I: FromIBinder + ?Sized> Eq for Weak<I> {}
 ///     fn on_transact(
 ///         &self,
 ///         code: TransactionCode,
-///         data: &Parcel,
-///         reply: &mut Parcel,
+///         data: &BorrowedParcel,
+///         reply: &mut BorrowedParcel,
 ///     ) -> Result<()> {
 ///         // ...
 ///     }
@@ -635,6 +636,7 @@ unsafe impl<T, V: AsNative<T>> AsNative<T> for Option<V> {
 pub struct BinderFeatures {
     /// Indicates that the service intends to receive caller security contexts. This must be true
     /// for `ThreadState::with_calling_sid` to work.
+    #[cfg(not(android_vndk))]
     pub set_requesting_sid: bool,
     // Ensure that clients include a ..BinderFeatures::default() to preserve backwards compatibility
     // when new fields are added. #[non_exhaustive] doesn't work because it prevents struct
@@ -655,13 +657,13 @@ pub struct BinderFeatures {
 /// have the following type:
 ///
 /// ```
-/// # use binder::{Interface, TransactionCode, Parcel};
+/// # use binder::{Interface, TransactionCode, BorrowedParcel};
 /// # trait Placeholder {
 /// fn on_transact(
 ///     service: &dyn Interface,
 ///     code: TransactionCode,
-///     data: &Parcel,
-///     reply: &mut Parcel,
+///     data: &BorrowedParcel,
+///     reply: &mut BorrowedParcel,
 /// ) -> binder::Result<()>;
 /// # }
 /// ```
@@ -676,7 +678,7 @@ pub struct BinderFeatures {
 /// using the provided function, `on_transact`.
 ///
 /// ```
-/// use binder::{declare_binder_interface, Binder, Interface, TransactionCode, Parcel};
+/// use binder::{declare_binder_interface, Binder, Interface, TransactionCode, BorrowedParcel};
 ///
 /// pub trait IServiceManager: Interface {
 ///     // remote methods...
@@ -692,8 +694,8 @@ pub struct BinderFeatures {
 /// fn on_transact(
 ///     service: &dyn IServiceManager,
 ///     code: TransactionCode,
-///     data: &Parcel,
-///     reply: &mut Parcel,
+///     data: &BorrowedParcel,
+///     reply: &mut BorrowedParcel,
 /// ) -> binder::Result<()> {
 ///     // ...
 ///     Ok(())
@@ -837,6 +839,7 @@ macro_rules! declare_binder_interface {
             /// Create a new binder service.
             pub fn new_binder<T: $interface + Sync + Send + 'static>(inner: T, features: $crate::BinderFeatures) -> $crate::Strong<dyn $interface> {
                 let mut binder = $crate::Binder::new_with_stability($native(Box::new(inner)), $stability);
+                #[cfg(not(android_vndk))]
                 $crate::IBinderInternal::set_requesting_sid(&mut binder, features.set_requesting_sid);
                 $crate::Strong::new(Box::new(binder))
             }
@@ -847,7 +850,7 @@ macro_rules! declare_binder_interface {
                 $descriptor
             }
 
-            fn on_transact(&self, code: $crate::TransactionCode, data: &$crate::Parcel, reply: &mut $crate::Parcel) -> $crate::Result<()> {
+            fn on_transact(&self, code: $crate::TransactionCode, data: &$crate::BorrowedParcel<'_>, reply: &mut $crate::BorrowedParcel<'_>) -> $crate::Result<()> {
                 match $on_transact(&*self.0, code, data, reply) {
                     // The C++ backend converts UNEXPECTED_NULL into an exception
                     Err($crate::StatusCode::UNEXPECTED_NULL) => {
@@ -922,14 +925,14 @@ macro_rules! declare_binder_interface {
         where
             dyn $interface: $crate::Interface
         {
-            fn serialize(&self, parcel: &mut $crate::parcel::Parcel) -> $crate::Result<()> {
+            fn serialize(&self, parcel: &mut $crate::parcel::BorrowedParcel<'_>) -> $crate::Result<()> {
                 let binder = $crate::Interface::as_binder(self);
                 parcel.write(&binder)
             }
         }
 
         impl $crate::parcel::SerializeOption for dyn $interface + '_ {
-            fn serialize_option(this: Option<&Self>, parcel: &mut $crate::parcel::Parcel) -> $crate::Result<()> {
+            fn serialize_option(this: Option<&Self>, parcel: &mut $crate::parcel::BorrowedParcel<'_>) -> $crate::Result<()> {
                 parcel.write(&this.map($crate::Interface::as_binder))
             }
         }
@@ -988,14 +991,14 @@ macro_rules! declare_binder_interface {
         }
 
         impl<P: $crate::BinderAsyncPool> $crate::parcel::Serialize for dyn $async_interface<P> + '_ {
-            fn serialize(&self, parcel: &mut $crate::parcel::Parcel) -> $crate::Result<()> {
+            fn serialize(&self, parcel: &mut $crate::parcel::BorrowedParcel<'_>) -> $crate::Result<()> {
                 let binder = $crate::Interface::as_binder(self);
                 parcel.write(&binder)
             }
         }
 
         impl<P: $crate::BinderAsyncPool> $crate::parcel::SerializeOption for dyn $async_interface<P> + '_ {
-            fn serialize_option(this: Option<&Self>, parcel: &mut $crate::parcel::Parcel) -> $crate::Result<()> {
+            fn serialize_option(this: Option<&Self>, parcel: &mut $crate::parcel::BorrowedParcel<'_>) -> $crate::Result<()> {
                 parcel.write(&this.map($crate::Interface::as_binder))
             }
         }
@@ -1040,26 +1043,26 @@ macro_rules! declare_binder_enum {
         }
 
         impl $crate::parcel::Serialize for $enum {
-            fn serialize(&self, parcel: &mut $crate::parcel::Parcel) -> $crate::Result<()> {
+            fn serialize(&self, parcel: &mut $crate::parcel::BorrowedParcel<'_>) -> $crate::Result<()> {
                 parcel.write(&self.0)
             }
         }
 
         impl $crate::parcel::SerializeArray for $enum {
-            fn serialize_array(slice: &[Self], parcel: &mut $crate::parcel::Parcel) -> $crate::Result<()> {
+            fn serialize_array(slice: &[Self], parcel: &mut $crate::parcel::BorrowedParcel<'_>) -> $crate::Result<()> {
                 let v: Vec<$backing> = slice.iter().map(|x| x.0).collect();
                 <$backing as binder::parcel::SerializeArray>::serialize_array(&v[..], parcel)
             }
         }
 
         impl $crate::parcel::Deserialize for $enum {
-            fn deserialize(parcel: &$crate::parcel::Parcel) -> $crate::Result<Self> {
+            fn deserialize(parcel: &$crate::parcel::BorrowedParcel<'_>) -> $crate::Result<Self> {
                 parcel.read().map(Self)
             }
         }
 
         impl $crate::parcel::DeserializeArray for $enum {
-            fn deserialize_array(parcel: &$crate::parcel::Parcel) -> $crate::Result<Option<Vec<Self>>> {
+            fn deserialize_array(parcel: &$crate::parcel::BorrowedParcel<'_>) -> $crate::Result<Option<Vec<Self>>> {
                 let v: Option<Vec<$backing>> =
                     <$backing as binder::parcel::DeserializeArray>::deserialize_array(parcel)?;
                 Ok(v.map(|v| v.into_iter().map(Self).collect()))
