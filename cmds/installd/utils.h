@@ -120,6 +120,11 @@ int create_dir_if_needed(const std::string& pathname, mode_t mode);
 int delete_dir_contents(const std::string& pathname, bool ignore_if_missing = false);
 int delete_dir_contents_and_dir(const std::string& pathname, bool ignore_if_missing = false);
 
+bool is_renamed_deleted_dir(const std::string& path);
+int rename_delete_dir_contents_and_dir(const std::string& pathname, bool ignore_if_missing = true);
+
+void cleanup_invalid_package_dirs_under_path(const std::string& pathname);
+
 int delete_dir_contents(const char *pathname,
                         int also_delete_dir,
                         int (*exclusion_predicate)(const char *name, const int is_dir),

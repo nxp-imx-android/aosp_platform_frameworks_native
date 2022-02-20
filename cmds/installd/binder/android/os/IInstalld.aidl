@@ -126,6 +126,8 @@ interface IInstalld {
 
     void migrateLegacyObbData();
 
+    void cleanupInvalidPackageDirs(@nullable @utf8InCpp String uuid, int userId, int flags);
+
     const int FLAG_STORAGE_DE = 0x1;
     const int FLAG_STORAGE_CE = 0x2;
     const int FLAG_STORAGE_EXTERNAL = 0x4;
