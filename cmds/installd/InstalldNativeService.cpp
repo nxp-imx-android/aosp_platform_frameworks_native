@@ -957,13 +957,13 @@ binder::Status InstalldNativeService::destroyAppData(const std::optional<std::st
     binder::Status res = ok();
     if (flags & FLAG_STORAGE_CE) {
         auto path = create_data_user_ce_package_path(uuid_, userId, pkgname, ceDataInode);
-        if (delete_dir_contents_and_dir(path) != 0) {
+        if (rename_delete_dir_contents_and_dir(path) != 0) {
             res = error("Failed to delete " + path);
         }
     }
     if (flags & FLAG_STORAGE_DE) {
         auto path = create_data_user_de_package_path(uuid_, userId, pkgname);
-        if (delete_dir_contents_and_dir(path) != 0) {
+        if (rename_delete_dir_contents_and_dir(path) != 0) {
             res = error("Failed to delete " + path);
         }
         if ((flags & FLAG_CLEAR_APP_DATA_KEEP_ART_PROFILES) == 0) {
@@ -997,7 +997,6 @@ binder::Status InstalldNativeService::destroyAppData(const std::optional<std::st
             if (delete_dir_contents_and_dir(path, true) != 0) {
                 res = error("Failed to delete contents of " + path);
             }
-
             path = StringPrintf("%s/Android/media/%s", extPath.c_str(), pkgname);
             if (delete_dir_contents_and_dir(path, true) != 0) {
                 res = error("Failed to delete contents of " + path);
@@ -3172,6 +3171,23 @@ binder::Status InstalldNativeService::migrateLegacyObbData() {
     // absolute parse and no command line arguments.
     if (system("/system/bin/migrate_legacy_obb_data.sh") != 0) { // NOLINT(cert-env33-c)
         LOG(ERROR) << "Unable to migrate legacy obb data";
+    }
+
+    return ok();
+}
+
+binder::Status InstalldNativeService::cleanupInvalidPackageDirs(
+        const std::optional<std::string>& uuid, int32_t userId, int32_t flags) {
+    const char* uuid_cstr = uuid ? uuid->c_str() : nullptr;
+
+    if (flags & FLAG_STORAGE_CE) {
+        auto ce_path = create_data_user_ce_path(uuid_cstr, userId);
+        cleanup_invalid_package_dirs_under_path(ce_path);
+    }
+
+    if (flags & FLAG_STORAGE_DE) {
+        auto de_path = create_data_user_de_path(uuid_cstr, userId);
+        cleanup_invalid_package_dirs_under_path(de_path);
     }
 
     return ok();
