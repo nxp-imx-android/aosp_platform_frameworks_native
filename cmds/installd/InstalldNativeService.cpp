@@ -103,11 +103,6 @@ static constexpr const char* PKG_LIB_POSTFIX = "/lib";
 static constexpr const char* CACHE_DIR_POSTFIX = "/cache";
 static constexpr const char* CODE_CACHE_DIR_POSTFIX = "/code_cache";
 
-// fsverity assumes the page size is always 4096. If not, the feature can not be
-// enabled.
-static constexpr int kVerityPageSize = 4096;
-static constexpr size_t kSha256Size = 32;
-static constexpr const char* kPropApkVerityMode = "ro.apk_verity.mode";
 static constexpr const char* kFuseProp = "persist.sys.fuse";
 
 /**
@@ -258,12 +253,6 @@ binder::Status checkArgumentPath(const std::optional<std::string>& path) {
     binder::Status status = checkArgumentPath((path));      \
     if (!status.isOk()) {                                   \
         return status;                                      \
-    }                                                       \
-}
-
-#define ASSERT_PAGE_SIZE_4K() {                             \
-    if (getpagesize() != kVerityPageSize) {                 \
-        return error("FSVerity only supports 4K pages");     \
     }                                                       \
 }
 
@@ -968,13 +957,13 @@ binder::Status InstalldNativeService::destroyAppData(const std::optional<std::st
     binder::Status res = ok();
     if (flags & FLAG_STORAGE_CE) {
         auto path = create_data_user_ce_package_path(uuid_, userId, pkgname, ceDataInode);
-        if (delete_dir_contents_and_dir(path) != 0) {
+        if (rename_delete_dir_contents_and_dir(path) != 0) {
             res = error("Failed to delete " + path);
         }
     }
     if (flags & FLAG_STORAGE_DE) {
         auto path = create_data_user_de_package_path(uuid_, userId, pkgname);
-        if (delete_dir_contents_and_dir(path) != 0) {
+        if (rename_delete_dir_contents_and_dir(path) != 0) {
             res = error("Failed to delete " + path);
         }
         if ((flags & FLAG_CLEAR_APP_DATA_KEEP_ART_PROFILES) == 0) {
@@ -1008,7 +997,6 @@ binder::Status InstalldNativeService::destroyAppData(const std::optional<std::st
             if (delete_dir_contents_and_dir(path, true) != 0) {
                 res = error("Failed to delete contents of " + path);
             }
-
             path = StringPrintf("%s/Android/media/%s", extPath.c_str(), pkgname);
             if (delete_dir_contents_and_dir(path, true) != 0) {
                 res = error("Failed to delete contents of " + path);
@@ -2022,6 +2010,10 @@ binder::Status InstalldNativeService::getAppSize(const std::optional<std::string
         const std::vector<std::string>& codePaths, std::vector<int64_t>* _aidl_return) {
     ENFORCE_UID(AID_SYSTEM);
     CHECK_ARGUMENT_UUID(uuid);
+    if (packageNames.size() != ceDataInodes.size()) {
+        return exception(binder::Status::EX_ILLEGAL_ARGUMENT,
+                         "packageNames/ceDataInodes size mismatch.");
+    }
     for (const auto& packageName : packageNames) {
         CHECK_ARGUMENT_PACKAGE_NAME(packageName);
     }
@@ -2959,142 +2951,6 @@ binder::Status InstalldNativeService::deleteOdex(const std::string& apkPath,
     return *_aidl_return == -1 ? error() : ok();
 }
 
-// This kernel feature is experimental.
-// TODO: remove local definition once upstreamed
-#ifndef FS_IOC_ENABLE_VERITY
-
-#define FS_IOC_ENABLE_VERITY           _IO('f', 133)
-#define FS_IOC_SET_VERITY_MEASUREMENT  _IOW('f', 134, struct fsverity_measurement)
-
-#define FS_VERITY_ALG_SHA256           1
-
-struct fsverity_measurement {
-    __u16 digest_algorithm;
-    __u16 digest_size;
-    __u32 reserved1;
-    __u64 reserved2[3];
-    __u8 digest[];
-};
-
-#endif
-
-binder::Status InstalldNativeService::installApkVerity(const std::string& filePath,
-        android::base::unique_fd verityInputAshmem, int32_t contentSize) {
-    ENFORCE_UID(AID_SYSTEM);
-    CHECK_ARGUMENT_PATH(filePath);
-    LOCK_PACKAGE();
-
-    if (!android::base::GetBoolProperty(kPropApkVerityMode, false)) {
-        return ok();
-    }
-#ifndef NDEBUG
-    ASSERT_PAGE_SIZE_4K();
-#endif
-    // TODO: also check fsverity support in the current file system if compiled with DEBUG.
-    // TODO: change ashmem to some temporary file to support huge apk.
-    if (!ashmem_valid(verityInputAshmem.get())) {
-        return error("FD is not an ashmem");
-    }
-
-    // 1. Seek to the next page boundary beyond the end of the file.
-    ::android::base::unique_fd wfd(open(filePath.c_str(), O_WRONLY));
-    if (wfd.get() < 0) {
-        return error("Failed to open " + filePath);
-    }
-    struct stat st;
-    if (fstat(wfd.get(), &st) < 0) {
-        return error("Failed to stat " + filePath);
-    }
-    // fsverity starts from the block boundary.
-    off_t padding = kVerityPageSize - st.st_size % kVerityPageSize;
-    if (padding == kVerityPageSize) {
-        padding = 0;
-    }
-    if (lseek(wfd.get(), st.st_size + padding, SEEK_SET) < 0) {
-        return error("Failed to lseek " + filePath);
-    }
-
-    // 2. Write everything in the ashmem to the file.  Note that allocated
-    //    ashmem size is multiple of page size, which is different from the
-    //    actual content size.
-    int shmSize = ashmem_get_size_region(verityInputAshmem.get());
-    if (shmSize < 0) {
-        return error("Failed to get ashmem size: " + std::to_string(shmSize));
-    }
-    if (contentSize < 0) {
-        return error("Invalid content size: " + std::to_string(contentSize));
-    }
-    if (contentSize > shmSize) {
-        return error("Content size overflow: " + std::to_string(contentSize) + " > " +
-                     std::to_string(shmSize));
-    }
-    auto data = std::unique_ptr<void, std::function<void (void *)>>(
-        mmap(nullptr, contentSize, PROT_READ, MAP_SHARED, verityInputAshmem.get(), 0),
-        [contentSize] (void* ptr) {
-          if (ptr != MAP_FAILED) {
-            munmap(ptr, contentSize);
-          }
-        });
-
-    if (data.get() == MAP_FAILED) {
-        return error("Failed to mmap the ashmem");
-    }
-    char* cursor = reinterpret_cast<char*>(data.get());
-    int remaining = contentSize;
-    while (remaining > 0) {
-        int ret = TEMP_FAILURE_RETRY(write(wfd.get(), cursor, remaining));
-        if (ret < 0) {
-            return error("Failed to write to " + filePath + " (" + std::to_string(remaining) +
-                         + "/" + std::to_string(contentSize) + ")");
-        }
-        cursor += ret;
-        remaining -= ret;
-    }
-    wfd.reset();
-
-    // 3. Enable fsverity (needs readonly fd. Once it's done, the file becomes immutable.
-    ::android::base::unique_fd rfd(open(filePath.c_str(), O_RDONLY));
-    if (ioctl(rfd.get(), FS_IOC_ENABLE_VERITY, nullptr) < 0) {
-        return error("Failed to enable fsverity on " + filePath);
-    }
-    return ok();
-}
-
-binder::Status InstalldNativeService::assertFsverityRootHashMatches(const std::string& filePath,
-        const std::vector<uint8_t>& expectedHash) {
-    ENFORCE_UID(AID_SYSTEM);
-    CHECK_ARGUMENT_PATH(filePath);
-    LOCK_PACKAGE();
-
-    if (!android::base::GetBoolProperty(kPropApkVerityMode, false)) {
-        return ok();
-    }
-    // TODO: also check fsverity support in the current file system if compiled with DEBUG.
-    if (expectedHash.size() != kSha256Size) {
-        return error("verity hash size should be " + std::to_string(kSha256Size) + " but is " +
-                     std::to_string(expectedHash.size()));
-    }
-
-    ::android::base::unique_fd fd(open(filePath.c_str(), O_RDONLY));
-    if (fd.get() < 0) {
-        return error("Failed to open " + filePath + ": " + strerror(errno));
-    }
-
-    unsigned int buffer_size = sizeof(fsverity_measurement) + kSha256Size;
-    std::vector<char> buffer(buffer_size, 0);
-
-    fsverity_measurement* config = reinterpret_cast<fsverity_measurement*>(buffer.data());
-    config->digest_algorithm = FS_VERITY_ALG_SHA256;
-    config->digest_size = kSha256Size;
-    memcpy(config->digest, expectedHash.data(), kSha256Size);
-    if (ioctl(fd.get(), FS_IOC_SET_VERITY_MEASUREMENT, config) < 0) {
-        // This includes an expected failure case with no FSVerity setup. It normally happens when
-        // the apk does not contains the Merkle tree root hash.
-        return error("Failed to measure fsverity on " + filePath + ": " + strerror(errno));
-    }
-    return ok();  // hashes match
-}
-
 binder::Status InstalldNativeService::reconcileSecondaryDexFile(
         const std::string& dexPath, const std::string& packageName, int32_t uid,
         const std::vector<std::string>& isas, const std::optional<std::string>& volumeUuid,
@@ -3319,6 +3175,23 @@ binder::Status InstalldNativeService::migrateLegacyObbData() {
     // absolute parse and no command line arguments.
     if (system("/system/bin/migrate_legacy_obb_data.sh") != 0) { // NOLINT(cert-env33-c)
         LOG(ERROR) << "Unable to migrate legacy obb data";
+    }
+
+    return ok();
+}
+
+binder::Status InstalldNativeService::cleanupInvalidPackageDirs(
+        const std::optional<std::string>& uuid, int32_t userId, int32_t flags) {
+    const char* uuid_cstr = uuid ? uuid->c_str() : nullptr;
+
+    if (flags & FLAG_STORAGE_CE) {
+        auto ce_path = create_data_user_ce_path(uuid_cstr, userId);
+        cleanup_invalid_package_dirs_under_path(ce_path);
+    }
+
+    if (flags & FLAG_STORAGE_DE) {
+        auto de_path = create_data_user_de_path(uuid_cstr, userId);
+        cleanup_invalid_package_dirs_under_path(de_path);
     }
 
     return ok();
