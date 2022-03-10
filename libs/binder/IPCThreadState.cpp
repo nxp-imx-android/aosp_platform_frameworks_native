@@ -27,6 +27,7 @@
 #include <utils/CallStack.h>
 #include <utils/Log.h>
 #include <utils/SystemClock.h>
+#include <utils/threads.h>
 
 #include <atomic>
 #include <errno.h>
@@ -1198,7 +1199,8 @@ status_t IPCThreadState::executeCommand(int32_t cmd)
 
     case BR_DECREFS:
         refs = (RefBase::weakref_type*)mIn.readPointer();
-        obj = (BBinder*)mIn.readPointer();
+        // NOLINTNEXTLINE(clang-analyzer-deadcode.DeadStores)
+        obj = (BBinder*)mIn.readPointer(); // consume
         // NOTE: This assertion is not valid, because the object may no
         // longer exist (thus the (BBinder*)cast above resulting in a different
         // memory address).
@@ -1408,7 +1410,7 @@ status_t IPCThreadState::getProcessFreezeInfo(pid_t pid, uint32_t *sync_received
                                               uint32_t *async_received)
 {
     int ret = 0;
-    binder_frozen_status_info info;
+    binder_frozen_status_info info = {};
     info.pid = pid;
 
 #if defined(__ANDROID__)
