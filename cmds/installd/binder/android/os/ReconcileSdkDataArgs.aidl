@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2008 The Android Open Source Project
+ * Copyright (C) 2022 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,15 +14,17 @@
  * limitations under the License.
  */
 
-// All static variables go here, to control initialization and
-// destruction order in the library.
+package android.os;
 
-#include <binder/IBinder.h>
-#include <binder/ProcessState.h>
-
-namespace android {
-
-// For TextStream.cpp
-extern Vector<int32_t> gTextBuffers;
-
-}   // namespace android
+/** {@hide} */
+parcelable ReconcileSdkDataArgs {
+    @nullable @utf8InCpp String uuid;
+    @utf8InCpp String packageName;
+    @utf8InCpp List<String> sdkPackageNames;
+    @utf8InCpp List<String> randomSuffixes;
+    int userId;
+    int appId;
+    int previousAppId;
+    @utf8InCpp String seInfo;
+    int flags;
+}
