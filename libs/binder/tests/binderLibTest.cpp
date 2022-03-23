@@ -57,6 +57,7 @@ using namespace std::chrono_literals;
 using android::base::testing::HasValue;
 using android::base::testing::Ok;
 using testing::ExplainMatchResult;
+using testing::Matcher;
 using testing::Not;
 using testing::WithParamInterface;
 
@@ -1220,6 +1221,19 @@ TEST_F(BinderLibTest, GotSid) {
     EXPECT_THAT(server->transact(BINDER_LIB_TEST_CAN_GET_SID, data, nullptr), StatusEq(OK));
 }
 
+TEST(ServiceNotifications, Unregister) {
+    auto sm = defaultServiceManager();
+    using LocalRegistrationCallback = IServiceManager::LocalRegistrationCallback;
+    class LocalRegistrationCallbackImpl : public virtual LocalRegistrationCallback {
+        void onServiceRegistration(const String16 &, const sp<IBinder> &) override {}
+        virtual ~LocalRegistrationCallbackImpl() {}
+    };
+    sp<LocalRegistrationCallback> cb = sp<LocalRegistrationCallbackImpl>::make();
+
+    EXPECT_EQ(sm->registerForNotifications(String16("RogerRafa"), cb), OK);
+    EXPECT_EQ(sm->unregisterForNotifications(String16("RogerRafa"), cb), OK);
+}
+
 class BinderLibRpcTestBase : public BinderLibTest {
 public:
     void SetUp() override {
@@ -1245,12 +1259,23 @@ public:
 
 class BinderLibRpcTest : public BinderLibRpcTestBase {};
 
+// e.g. EXPECT_THAT(expr, Debuggable(StatusEq(...))
+// If device is debuggable AND not on user builds, expects matcher.
+// Otherwise expects INVALID_OPERATION.
+// Debuggable + non user builds is necessary but not sufficient for setRpcClientDebug to work.
+static Matcher<status_t> Debuggable(const Matcher<status_t> &matcher) {
+    bool isDebuggable = android::base::GetBoolProperty("ro.debuggable", false) &&
+            android::base::GetProperty("ro.build.type", "") != "user";
+    return isDebuggable ? matcher : StatusEq(INVALID_OPERATION);
+}
+
 TEST_F(BinderLibRpcTest, SetRpcClientDebug) {
     auto binder = addServer();
     ASSERT_TRUE(binder != nullptr);
     auto [socket, port] = CreateSocket();
     ASSERT_TRUE(socket.ok());
-    EXPECT_THAT(binder->setRpcClientDebug(std::move(socket), sp<BBinder>::make()), StatusEq(OK));
+    EXPECT_THAT(binder->setRpcClientDebug(std::move(socket), sp<BBinder>::make()),
+                Debuggable(StatusEq(OK)));
 }
 
 // Tests for multiple RpcServer's on the same binder object.
@@ -1261,12 +1286,14 @@ TEST_F(BinderLibRpcTest, SetRpcClientDebugTwice) {
     auto [socket1, port1] = CreateSocket();
     ASSERT_TRUE(socket1.ok());
     auto keepAliveBinder1 = sp<BBinder>::make();
-    EXPECT_THAT(binder->setRpcClientDebug(std::move(socket1), keepAliveBinder1), StatusEq(OK));
+    EXPECT_THAT(binder->setRpcClientDebug(std::move(socket1), keepAliveBinder1),
+                Debuggable(StatusEq(OK)));
 
     auto [socket2, port2] = CreateSocket();
     ASSERT_TRUE(socket2.ok());
     auto keepAliveBinder2 = sp<BBinder>::make();
-    EXPECT_THAT(binder->setRpcClientDebug(std::move(socket2), keepAliveBinder2), StatusEq(OK));
+    EXPECT_THAT(binder->setRpcClientDebug(std::move(socket2), keepAliveBinder2),
+                Debuggable(StatusEq(OK)));
 }
 
 // Negative tests for RPC APIs on IBinder. Call should fail in the same way on both remote and
@@ -1285,7 +1312,7 @@ TEST_P(BinderLibRpcTestP, SetRpcClientDebugNoFd) {
     auto binder = GetService();
     ASSERT_TRUE(binder != nullptr);
     EXPECT_THAT(binder->setRpcClientDebug(android::base::unique_fd(), sp<BBinder>::make()),
-                StatusEq(BAD_VALUE));
+                Debuggable(StatusEq(BAD_VALUE)));
 }
 
 TEST_P(BinderLibRpcTestP, SetRpcClientDebugNoKeepAliveBinder) {
@@ -1293,7 +1320,8 @@ TEST_P(BinderLibRpcTestP, SetRpcClientDebugNoKeepAliveBinder) {
     ASSERT_TRUE(binder != nullptr);
     auto [socket, port] = CreateSocket();
     ASSERT_TRUE(socket.ok());
-    EXPECT_THAT(binder->setRpcClientDebug(std::move(socket), nullptr), StatusEq(UNEXPECTED_NULL));
+    EXPECT_THAT(binder->setRpcClientDebug(std::move(socket), nullptr),
+                Debuggable(StatusEq(UNEXPECTED_NULL)));
 }
 INSTANTIATE_TEST_CASE_P(BinderLibTest, BinderLibRpcTestP, testing::Bool(),
                         BinderLibRpcTestP::ParamToString);
