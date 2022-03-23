@@ -37,6 +37,7 @@
 #include <android-base/unique_fd.h>
 #include <cutils/fs.h>
 #include <cutils/properties.h>
+#include <linux/fs.h>
 #include <log/log.h>
 #include <private/android_filesystem_config.h>
 #include <private/android_projectid_config.h>
@@ -212,7 +213,7 @@ std::string create_data_misc_sdk_sandbox_path(const char* uuid, bool isCeData, u
 
 /**
  * Create the path name where code data for all codes in a particular app will be stored.
- * E.g. /data/misc_ce/0/sdksandbox/<app-name>
+ * E.g. /data/misc_ce/0/sdksandbox/<package-name>
  */
 std::string create_data_misc_sdk_sandbox_package_path(const char* volume_uuid, bool isCeData,
                                                       userid_t user, const char* package_name) {
@@ -224,7 +225,7 @@ std::string create_data_misc_sdk_sandbox_package_path(const char* volume_uuid, b
 
 /**
  * Create the path name where shared code data for a particular app will be stored.
- * E.g. /data/misc_ce/0/sdksandbox/<app-name>/shared
+ * E.g. /data/misc_ce/0/sdksandbox/<package-name>/shared
  */
 std::string create_data_misc_sdk_sandbox_shared_path(const char* volume_uuid, bool isCeData,
                                                      userid_t user, const char* package_name) {
@@ -232,6 +233,19 @@ std::string create_data_misc_sdk_sandbox_shared_path(const char* volume_uuid, bo
                         create_data_misc_sdk_sandbox_package_path(volume_uuid, isCeData, user,
                                                                   package_name)
                                 .c_str());
+}
+
+/**
+ * Create the path name where per-code level data for a particular app will be stored.
+ * E.g. /data/misc_ce/0/sdksandbox/<package-name>/<sdk-name>-<random-suffix>
+ */
+std::string create_data_misc_sdk_sandbox_sdk_path(const char* volume_uuid, bool isCeData,
+                                                  userid_t user, const char* package_name,
+                                                  const char* sdk_name, const char* randomSuffix) {
+    check_package_name(sdk_name);
+    auto package_path =
+            create_data_misc_sdk_sandbox_package_path(volume_uuid, isCeData, user, package_name);
+    return StringPrintf("%s/%s@%s", package_path.c_str(), sdk_name, randomSuffix);
 }
 
 std::string create_data_misc_ce_rollback_base_path(const char* volume_uuid, userid_t user) {
@@ -421,7 +435,44 @@ std::vector<userid_t> get_known_users(const char* volume_uuid) {
 
     return users;
 }
+long get_project_id(uid_t uid, long start_project_id_range) {
+    return uid - AID_APP_START + start_project_id_range;
+}
 
+int set_quota_project_id(const std::string& path, long project_id, bool set_inherit) {
+    struct fsxattr fsx;
+    android::base::unique_fd fd(TEMP_FAILURE_RETRY(open(path.c_str(), O_RDONLY | O_CLOEXEC)));
+    if (fd == -1) {
+        PLOG(ERROR) << "Failed to open " << path << " to set project id.";
+        return -1;
+    }
+
+    if (ioctl(fd, FS_IOC_FSGETXATTR, &fsx) == -1) {
+        PLOG(ERROR) << "Failed to get extended attributes for " << path << " to get project id.";
+        return -1;
+    }
+
+    fsx.fsx_projid = project_id;
+    if (ioctl(fd, FS_IOC_FSSETXATTR, &fsx) == -1) {
+        PLOG(ERROR) << "Failed to set project id on " << path;
+        return -1;
+    }
+    if (set_inherit) {
+        unsigned int flags;
+        if (ioctl(fd, FS_IOC_GETFLAGS, &flags) == -1) {
+            PLOG(ERROR) << "Failed to get flags for " << path << " to set project id inheritance.";
+            return -1;
+        }
+
+        flags |= FS_PROJINHERIT_FL;
+
+        if (ioctl(fd, FS_IOC_SETFLAGS, &flags) == -1) {
+            PLOG(ERROR) << "Failed to set flags for " << path << " to set project id inheritance.";
+            return -1;
+        }
+    }
+    return 0;
+}
 int calculate_tree_size(const std::string& path, int64_t* size,
         int32_t include_gid, int32_t exclude_gid, bool exclude_apps) {
     FTS *fts;
@@ -694,6 +745,34 @@ static auto open_dir(const char* dir) {
         void operator()(DIR* d) const noexcept { ::closedir(d); }
     };
     return std::unique_ptr<DIR, DirCloser>(::opendir(dir));
+}
+
+// Collects filename of subdirectories of given directory and passes it to the function
+int foreach_subdir(const std::string& pathname, const std::function<void(const std::string&)> fn) {
+    auto dir = open_dir(pathname.c_str());
+    if (!dir) return -1;
+
+    int dfd = dirfd(dir.get());
+    if (dfd < 0) {
+        ALOGE("Couldn't dirfd %s: %s\n", pathname.c_str(), strerror(errno));
+        return -1;
+    }
+
+    struct dirent* de;
+    while ((de = readdir(dir.get()))) {
+        if (de->d_type != DT_DIR) {
+            continue;
+        }
+
+        std::string name{de->d_name};
+        // always skip "." and ".."
+        if (name == "." || name == "..") {
+            continue;
+        }
+        fn(name);
+    }
+
+    return 0;
 }
 
 void cleanup_invalid_package_dirs_under_path(const std::string& pathname) {
