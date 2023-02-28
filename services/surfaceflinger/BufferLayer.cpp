@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2017 The Android Open Source Project
+ * Copyright 2023 NXP.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -55,6 +56,8 @@
 #include "FrameTracer/FrameTracer.h"
 #include "LayerRejecter.h"
 #include "TimeStats/TimeStats.h"
+
+#define IS_VENDOR_FORMAT(f) (((f) >= 0x104 && (f) <= 0x110) || ((f) == HAL_PIXEL_FORMAT_YCBCR_P010))
 
 namespace android {
 
@@ -162,7 +165,8 @@ std::optional<compositionengine::LayerFE::LayerSettings> BufferLayer::prepareCli
         return result;
     }
     const bool blackOutLayer = (isProtected() && !targetSettings.supportsProtectedContent) ||
-            ((isSecure() || isProtected()) && !targetSettings.isSecure);
+            ((isSecure() || isProtected()) && !targetSettings.isSecure) ||
+            IS_VENDOR_FORMAT(getPixelFormat());
     const bool bufferCanBeUsedAsHwTexture =
             mBufferInfo.mBuffer->getUsage() & GraphicBuffer::USAGE_HW_TEXTURE;
     compositionengine::LayerFE::LayerSettings& layer = *result;
