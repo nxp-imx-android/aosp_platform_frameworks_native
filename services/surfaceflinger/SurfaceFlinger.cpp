@@ -154,8 +154,6 @@
 #define NO_THREAD_SAFETY_ANALYSIS \
     _Pragma("GCC error \"Prefer <ftl/fake_guard.h> or MutexUtils.h helpers.\"")
 
-#define BUFFER_IS_VENDOR_FORMAT(buffer) ((buffer) != nullptr && ((buffer)->format >= 0x104 && (buffer)->format <= 0x110))
-
 namespace android {
 
 using namespace std::string_literals;
@@ -6852,13 +6850,10 @@ ftl::SharedFuture<FenceResult> SurfaceFlinger::renderScreenImpl(
                 captureResults.capturedHdrLayers |= isHdrLayer(layer);
             }
 
-            sp<const GraphicBuffer> buffer = layer->getBuffer();
-            if (!BUFFER_IS_VENDOR_FORMAT(buffer)){
-                clientCompositionLayers.insert(clientCompositionLayers.end(),
+            clientCompositionLayers.insert(clientCompositionLayers.end(),
                                            std::make_move_iterator(results.begin()),
                                            std::make_move_iterator(results.end()));
-                renderedLayers.push_back(layer);
-            }
+            renderedLayers.push_back(layer);
         }
 
     });
